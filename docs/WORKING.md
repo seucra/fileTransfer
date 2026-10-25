@@ -86,4 +86,31 @@ When an ACK packet arrives at the sender:
 Both the Sender and Receiver threads use non-blocking UDP sockets (`socket.set_nonblocking(true)`):
 - During heavy transfer loops, draining incoming ACKs doesn't block the thread when the socket queue is empty.
 - A tiny sub-millisecond yield (`thread::sleep(Duration::from_micros(500))`) prevents 100% CPU core spinning while keeping latency low.
-- Inter-thread communication with the GUI uses lock-free crossbeam channels, ensuring the UI remains responsive at 60 FPS even during maximum throughput transfers.
+- Inter-thread communication with the GUI uses bounded, lock-free `crossbeam-channel` queues with non-blocking `try_send` for periodic snapshots, ensuring the network worker never blocks on UI rendering.
+
+---
+
+## 5. Protocol Observability Dashboard & State Semantics
+
+The GUI includes a real-time **Live Sliding Window & SACK Packet Matrix**, **Full-File Minimap**, **Pinned Chunk Inspector**, and **Bounded Protocol Event Timeline**.
+
+### Explicit State Precedence & Transition Rules
+Chunk states follow a strict precedence order (`Acked (4) > Sacked (3) > Retransmitting (2) > InFlight (1) > Pending (0)`):
+
+1. **`Pending` (`·`)**: Chunk has not yet been transmitted (`seq >= next_seq` on Sender) or is beyond `highest_observed_seq` on Receiver.
+2. **`InFlight` (`→`)**: Initial transmission in flight within the active sliding window (`base <= seq < next_seq`, `retransmit_count == 0`, unacknowledged) on Sender, or an unreceived sequence gap below `highest_observed_seq` on Receiver.
+3. **`Retransmitting` (`↻`)**: Unacknowledged chunk whose RTO timer expired and is currently in flight as a retransmission (`retransmit_count > 0`, `!acked`).
+4. **`Sacked` (`S`)**: Selectively acknowledged out-of-order ahead of `base` (`seq > base` with bit set in the 64-bit `sack_bitmask` or buffered in Receiver's `out_of_order` set).
+5. **`Acked` (`✓`)**: Cumulatively acknowledged (`seq < base`) and committed in sequence.
+
+### Retransmission History vs. Transient State
+- While a chunk is actively being retried prior to acknowledgment, its state is `Retransmitting`.
+- Once that chunk is selectively (`Sacked`) or cumulatively (`Acked`) confirmed, its current state transitions to `Sacked` or `Acked`, while its persistent retransmission history (`had_retransmission = true`, `retransmit_count`, and `RetransmitReason`) remains preserved and indicated by an orange-red corner marker on the matrix cell and in the Chunk Inspector.
+
+### Observability Boundaries (What Is vs. Is Not Observable on the Wire)
+To avoid fabricating or approximating unobserved network state:
+1. **No False "Physical Loss" Assumption**: A missing ACK or sequence gap is never labeled "physically lost" before timeout expiration, because UDP packets may simply be delayed or reordered in transit.
+2. **Sender vs. Receiver Perspective**:
+   - **Sender Host**: Directly observes `next_seq`, per-chunk `first_sent_at` and `last_sent_at` timestamps, Karn RTT samples, dynamic RTO timers, and RTO-triggered retransmission counts. It observes the receiver's out-of-order buffer up to `base + 64` via incoming `ACK` + `sack_bitmask` packets, but cannot distinguish forward-path `DATA` drops from reverse-path `ACK` drops.
+   - **Receiver Host**: Directly observes cumulative `base`, out-of-order buffered chunks written to disk, arrival timestamps, duplicate deliveries, and the wire-level `FLAG_RETRANSMISSION` (`0x01`) header bit on incoming `DATA` packets. It does not observe sender-internal unreceived `next_seq` advances, sender send timestamps, or sender RTT/RTO timers.
+3. **Configured Simulated Drop vs. Observed Retransmissions**: The synthetic drop percentage configured on `ReliableUdpSocket` is reported strictly as a synthetic test setting, never as a measured physical network loss rate.

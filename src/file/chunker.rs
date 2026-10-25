@@ -64,7 +64,10 @@ impl FileChunker {
         if chunk_index >= self.total_chunks {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("Chunk index {} out of range (total: {})", chunk_index, self.total_chunks),
+                format!(
+                    "Chunk index {} out of range (total: {})",
+                    chunk_index, self.total_chunks
+                ),
             ));
         }
 

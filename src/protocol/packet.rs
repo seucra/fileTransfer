@@ -176,7 +176,13 @@ impl FinAckPayload {
 }
 
 impl Packet {
-    pub fn new(packet_type: PacketType, seq_num: u32, ack_num: u32, sack_bitmask: u64, payload: Vec<u8>) -> Self {
+    pub fn new(
+        packet_type: PacketType,
+        seq_num: u32,
+        ack_num: u32,
+        sack_bitmask: u64,
+        payload: Vec<u8>,
+    ) -> Self {
         Self {
             version: PROTOCOL_VERSION,
             packet_type,
@@ -201,7 +207,11 @@ impl Packet {
     }
 
     pub fn new_data(seq_num: u32, payload: Vec<u8>, is_retransmission: bool) -> Self {
-        let flags = if is_retransmission { FLAG_RETRANSMISSION } else { 0 };
+        let flags = if is_retransmission {
+            FLAG_RETRANSMISSION
+        } else {
+            0
+        };
         Self {
             version: PROTOCOL_VERSION,
             packet_type: PacketType::Data,
@@ -283,7 +293,11 @@ impl Packet {
     /// Deserialize binary bytes into Packet, validating magic, length, and CRC32 checksum.
     pub fn deserialize(bytes: &[u8]) -> Result<Self, String> {
         if bytes.len() < HEADER_SIZE {
-            return Err(format!("Datagram too short: {} bytes < {}", bytes.len(), HEADER_SIZE));
+            return Err(format!(
+                "Datagram too short: {} bytes < {}",
+                bytes.len(),
+                HEADER_SIZE
+            ));
         }
 
         // Verify magic

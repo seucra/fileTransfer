@@ -11,7 +11,10 @@ use std::sync::Arc;
 
 #[derive(Parser)]
 #[command(name = "file_transfer")]
-#[command(about = "Reliable File Transfer over UDP with GUI and Benchmark Mode", long_about = None)]
+#[command(
+    about = "Reliable File Transfer over UDP with GUI and Benchmark Mode",
+    long_about = None
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -191,7 +194,10 @@ fn main() -> eframe::Result<()> {
             println!("============================================================");
             println!("  COMPUTER NETWORKS PROJECT: UDP vs TCP BENCHMARK EVALUATION");
             println!("============================================================");
-            println!("Running empirical file transfer benchmarks for {} MB file...\n", size_mb);
+            println!(
+                "Running empirical file transfer benchmarks for {} MB file...\n",
+                size_mb
+            );
 
             match run_full_comparison(size_mb) {
                 Ok(results) => {
@@ -205,7 +211,11 @@ fn main() -> eframe::Result<()> {
                             r.elapsed.as_secs_f64(),
                             r.throughput_mb_s,
                             r.retransmissions,
-                            if r.integrity_verified { "VERIFIED OK" } else { "FAILED" }
+                            if r.integrity_verified {
+                                "VERIFIED OK"
+                            } else {
+                                "FAILED"
+                            }
                         );
                     }
                     println!("+--------------------------------+------------+--------------+-----------------+-------------------+\n");
@@ -221,8 +231,8 @@ fn main() -> eframe::Result<()> {
             // Default: Launch GUI application
             let native_options = eframe::NativeOptions {
                 viewport: eframe::egui::ViewportBuilder::default()
-                    .with_inner_size([720.0, 560.0])
-                    .with_min_inner_size([600.0, 480.0])
+                    .with_inner_size([880.0, 740.0])
+                    .with_min_inner_size([680.0, 520.0])
                     .with_title("Reliable UDP File Transfer"),
                 ..Default::default()
             };
