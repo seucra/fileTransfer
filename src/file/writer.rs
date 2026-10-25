@@ -11,7 +11,12 @@ pub struct FileWriter {
 }
 
 impl FileWriter {
-    pub fn new<P: AsRef<Path>>(dest_dir: P, file_name: &str, expected_size: u64, chunk_size: u32) -> io::Result<Self> {
+    pub fn new<P: AsRef<Path>>(
+        dest_dir: P,
+        file_name: &str,
+        expected_size: u64,
+        chunk_size: u32,
+    ) -> io::Result<Self> {
         let dir = dest_dir.as_ref();
         if !dir.exists() {
             fs::create_dir_all(dir)?;
@@ -55,16 +60,25 @@ impl FileWriter {
 
     /// Flush to disk, truncate to expected size, and compute SHA-256 to verify integrity
     pub fn finalize_and_verify(&mut self, expected_hash: &[u8; 32]) -> Result<(), String> {
-        self.file.flush().map_err(|e| format!("Flush error: {}", e))?;
-        self.file.set_len(self.expected_size).map_err(|e| format!("Truncate error: {}", e))?;
-        self.file.seek(SeekFrom::Start(0)).map_err(|e| format!("Seek error: {}", e))?;
+        self.file
+            .flush()
+            .map_err(|e| format!("Flush error: {}", e))?;
+        self.file
+            .set_len(self.expected_size)
+            .map_err(|e| format!("Truncate error: {}", e))?;
+        self.file
+            .seek(SeekFrom::Start(0))
+            .map_err(|e| format!("Seek error: {}", e))?;
 
         let mut hasher = Sha256::new();
         let mut buf = vec![0u8; 64 * 1024];
         let mut total_read = 0u64;
 
         loop {
-            let n = self.file.read(&mut buf).map_err(|e| format!("Read error during verification: {}", e))?;
+            let n = self
+                .file
+                .read(&mut buf)
+                .map_err(|e| format!("Read error during verification: {}", e))?;
             if n == 0 {
                 break;
             }

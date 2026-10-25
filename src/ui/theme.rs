@@ -33,3 +33,22 @@ pub const COLOR_WARNING: Color32 = Color32::from_rgb(255, 184, 77);
 pub const COLOR_DANGER: Color32 = Color32::from_rgb(245, 90, 90);
 pub const COLOR_CARD_BG: Color32 = Color32::from_rgb(26, 33, 48);
 pub const COLOR_CARD_BORDER: Color32 = Color32::from_rgb(45, 58, 85);
+
+// Packet Matrix state fill & border colors
+pub const COLOR_STATE_PENDING_BG: Color32 = Color32::from_rgb(30, 37, 52);
+pub const COLOR_STATE_PENDING_BORDER: Color32 = Color32::from_rgb(58, 70, 95);
+
+pub const COLOR_STATE_INFLIGHT_BG: Color32 = Color32::from_rgb(28, 74, 140);
+pub const COLOR_STATE_INFLIGHT_BORDER: Color32 = Color32::from_rgb(88, 166, 255);
+
+pub const COLOR_STATE_SACKED_BG: Color32 = Color32::from_rgb(122, 88, 20);
+pub const COLOR_STATE_SACKED_BORDER: Color32 = Color32::from_rgb(255, 200, 70);
+
+pub const COLOR_STATE_RETRANS_BG: Color32 = Color32::from_rgb(135, 36, 42);
+pub const COLOR_STATE_RETRANS_BORDER: Color32 = Color32::from_rgb(255, 95, 95);
+
+pub const COLOR_STATE_ACKED_BG: Color32 = Color32::from_rgb(24, 92, 56);
+pub const COLOR_STATE_ACKED_BORDER: Color32 = Color32::from_rgb(72, 207, 128);
+
+pub const COLOR_WINDOW_HIGHLIGHT: Color32 = Color32::from_rgb(110, 220, 255);
+pub const COLOR_PINNED_HIGHLIGHT: Color32 = Color32::from_rgb(255, 255, 255);

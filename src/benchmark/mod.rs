@@ -112,8 +112,12 @@ pub fn run_custom_udp_benchmark(
         }
     }
 
-    send_handle.join().map_err(|_| "Sender thread panicked".to_string())?;
-    recv_handle.join().map_err(|_| "Receiver thread panicked".to_string())?;
+    send_handle
+        .join()
+        .map_err(|_| "Sender thread panicked".to_string())?;
+    recv_handle
+        .join()
+        .map_err(|_| "Receiver thread panicked".to_string())?;
 
     if let Some(err) = send_error {
         return Err(format!("UDP benchmark sender error: {}", err));
@@ -124,7 +128,8 @@ pub fn run_custom_udp_benchmark(
     }
 
     let elapsed = start_time.elapsed();
-    let throughput_mb_s = (file_size as f64 / (1024.0 * 1024.0)) / elapsed.as_secs_f64().max(0.0001);
+    let throughput_mb_s =
+        (file_size as f64 / (1024.0 * 1024.0)) / elapsed.as_secs_f64().max(0.0001);
 
     Ok(BenchmarkResult {
         protocol: format!("Custom UDP ({}% loss)", loss_rate_percent),
@@ -145,7 +150,8 @@ pub fn run_full_comparison(file_size_mb: usize) -> Result<Vec<BenchmarkResult>, 
 
     let size_bytes = file_size_mb * 1024 * 1024;
     println!("Generating {} MB test file...", file_size_mb);
-    let hash = create_test_file(&src_file, size_bytes).map_err(|e| format!("Create test file: {}", e))?;
+    let hash =
+        create_test_file(&src_file, size_bytes).map_err(|e| format!("Create test file: {}", e))?;
 
     let mut results = Vec::new();
 
@@ -166,7 +172,8 @@ pub fn run_full_comparison(file_size_mb: usize) -> Result<Vec<BenchmarkResult>, 
 
     // 4. Custom UDP (15% simulated loss)
     println!("Benchmarking Custom UDP (15% Loss)...");
-    let udp_15 = run_custom_udp_benchmark(&src_file, size_bytes as u64, &dest_udp_dir, 15, 32, 1400)?;
+    let udp_15 =
+        run_custom_udp_benchmark(&src_file, size_bytes as u64, &dest_udp_dir, 15, 32, 1400)?;
     results.push(udp_15);
 
     Ok(results)
