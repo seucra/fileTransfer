@@ -5,11 +5,12 @@ use crate::protocol::stats::{
     ProtocolTelemetryEvent, TransferStats, WindowPerspective,
 };
 use crate::ui::theme::{
-    configure_theme, COLOR_CARD_BG, COLOR_CARD_BORDER, COLOR_DANGER, COLOR_PINNED_HIGHLIGHT,
-    COLOR_PRIMARY, COLOR_STATE_ACKED_BG, COLOR_STATE_ACKED_BORDER, COLOR_STATE_INFLIGHT_BG,
-    COLOR_STATE_INFLIGHT_BORDER, COLOR_STATE_PENDING_BG, COLOR_STATE_PENDING_BORDER,
-    COLOR_STATE_RETRANS_BG, COLOR_STATE_RETRANS_BORDER, COLOR_STATE_SACKED_BG,
-    COLOR_STATE_SACKED_BORDER, COLOR_SUCCESS, COLOR_WARNING, COLOR_WINDOW_HIGHLIGHT,
+    configure_theme, COLOR_CARD_BG, COLOR_CARD_BORDER, COLOR_DANGER, COLOR_INFO,
+    COLOR_PINNED_HIGHLIGHT, COLOR_PRIMARY, COLOR_STATE_ACKED_BG, COLOR_STATE_ACKED_BORDER,
+    COLOR_STATE_INFLIGHT_BG, COLOR_STATE_INFLIGHT_BORDER, COLOR_STATE_PENDING_BG,
+    COLOR_STATE_PENDING_BORDER, COLOR_STATE_RETRANS_BG, COLOR_STATE_RETRANS_BORDER,
+    COLOR_STATE_SACKED_BG, COLOR_STATE_SACKED_BORDER, COLOR_SUCCESS, COLOR_TEXT_MUTED,
+    COLOR_TEXT_PRIMARY, COLOR_TEXT_SECONDARY, COLOR_WARNING, COLOR_WINDOW_HIGHLIGHT,
 };
 use crossbeam_channel::{bounded, Receiver as ChannelReceiver, Sender as ChannelSender};
 use eframe::egui::{
@@ -18,7 +19,7 @@ use eframe::egui::{
 };
 use std::collections::{BTreeMap, VecDeque};
 use std::net::{IpAddr, SocketAddr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -103,6 +104,7 @@ pub struct TransferApp {
     replay_frame_index: Option<usize>,
     pinned_chunk_seq: Option<u32>,
     chunk_inspection_cache: BTreeMap<u32, ChunkSnapshot>,
+    log_search_query: String,
 }
 
 impl Default for TransferApp {
@@ -116,12 +118,12 @@ impl Default for TransferApp {
             .unwrap_or_else(|_| "./downloads".to_string());
 
         let mut logs = VecDeque::with_capacity(MAX_TIMELINE_EVENTS);
-        logs.push_back("Application initialized. Select Sender or Receiver mode.".to_string());
+        logs.push_back("Application initialized. Ready for UDP file transfer.".to_string());
 
         Self {
             mode: AppMode::Sender,
             state: TransferState::Idle,
-            status_message: "Ready to transfer files over UDP.".to_string(),
+            status_message: "Ready to initiate or receive reliable file transfer.".to_string(),
             local_ip: detected_ip.clone(),
             target_ip: detected_ip,
             port: 9999,
@@ -142,6 +144,7 @@ impl Default for TransferApp {
             replay_frame_index: None,
             pinned_chunk_seq: None,
             chunk_inspection_cache: BTreeMap::new(),
+            log_search_query: String::new(),
         }
     }
 }
@@ -155,7 +158,7 @@ impl TransferApp {
     fn refresh_local_ip(&mut self) {
         if let Ok(ip) = local_ip_address::local_ip() {
             self.local_ip = ip.to_string();
-            self.add_log(format!("Refreshed local IP address: {}", self.local_ip));
+            self.add_log(format!("Refreshed local network IP: {}", self.local_ip));
         }
     }
 
@@ -181,7 +184,7 @@ impl TransferApp {
         let file_path = PathBuf::from(&self.selected_file_path);
         if !file_path.exists() {
             self.state = TransferState::Failed;
-            self.status_message = "Selected file does not exist!".to_string();
+            self.status_message = "Selected file does not exist on disk.".to_string();
             self.add_log(self.status_message.clone());
             return;
         }
@@ -190,7 +193,7 @@ impl TransferApp {
             Ok(ip) => ip,
             Err(_) => {
                 self.state = TransferState::Failed;
-                self.status_message = "Invalid Receiver IP address!".to_string();
+                self.status_message = "Invalid Destination IP address format.".to_string();
                 self.add_log(self.status_message.clone());
                 return;
             }
@@ -219,7 +222,7 @@ impl TransferApp {
         self.state = TransferState::Active;
         self.status_message = format!("Connecting to receiver at {}...", target_addr);
         self.add_log(format!(
-            "Starting Sender -> Target: {}, Window: {}, Chunk Size: {}B, Configured Sim. Drop: {}%",
+            "Starting Sender -> Target: {}, Window: {} pkts, Chunk: {} B, Synthetic Drop: {}%",
             target_addr, self.window_size, self.chunk_size, self.simulated_loss_percent
         ));
 
@@ -250,7 +253,7 @@ impl TransferApp {
         self.state = TransferState::Active;
         self.status_message = format!("Listening for incoming files on UDP port {}...", self.port);
         self.add_log(format!(
-            "Starting Receiver on UDP port {}, Configured Sim. Drop: {}%",
+            "Starting Receiver on UDP port {}, Synthetic Drop: {}%",
             self.port, self.simulated_loss_percent
         ));
 
@@ -265,7 +268,7 @@ impl TransferApp {
         }
         self.state = TransferState::Cancelled;
         self.status_message = "Transfer cancelled by user.".to_string();
-        self.add_log("Transfer cancelled.".to_string());
+        self.add_log("Transfer cancelled by operator.".to_string());
     }
 
     fn ingest_snapshot(&mut self, mut st: TransferStats) {
@@ -292,7 +295,7 @@ impl TransferApp {
                 .insert(chunk.seq_num, chunk.clone());
         }
 
-        // If pinned chunk is now behind cumulative window_base, ensure its cached state reflects Cumulative Ack
+        // If pinned chunk is now behind cumulative window_base, ensure cached state reflects Cumulative Ack
         if let Some(pinned_seq) = self.pinned_chunk_seq {
             if pinned_seq < st.window_base {
                 if let Some(cached) = self.chunk_inspection_cache.get_mut(&pinned_seq) {
@@ -320,7 +323,7 @@ impl TransferApp {
         }
         self.snapshot_history.push_back(st.clone());
 
-        // Always keep live `self.stats` updated so worker progress is tracked even if UI visualization is paused
+        // Always keep live `self.stats` updated
         self.stats = Some(st);
     }
 
@@ -356,13 +359,13 @@ impl TransferApp {
                 TransferEvent::Cancelled => {
                     self.state = TransferState::Cancelled;
                     self.status_message = "Transfer cancelled.".to_string();
-                    self.add_log("Cancelled event received.".to_string());
+                    self.add_log("Transfer cancelled signal confirmed.".to_string());
                 }
             }
         }
     }
 
-    /// Return the snapshot currently displayed in the observability dashboard (either live or paused/replay frame).
+    /// Return the snapshot currently displayed in the observability dashboard (live or paused/replay frame).
     fn active_display_stats(&self) -> Option<&TransferStats> {
         if let Some(idx) = self.replay_frame_index {
             if let Some(frame) = self.snapshot_history.get(idx) {
@@ -370,6 +373,80 @@ impl TransferApp {
             }
         }
         self.stats.as_ref()
+    }
+
+    /// Compute specific protocol technical state for the status pill badge.
+    fn compute_detailed_state(&self) -> (&'static str, Color32, Color32) {
+        match self.state {
+            TransferState::Idle => ("IDLE", Color32::from_rgb(26, 30, 40), COLOR_TEXT_MUTED),
+            TransferState::Completed => (
+                "COMPLETED",
+                Color32::from_rgb(20, 64, 36),
+                COLOR_SUCCESS,
+            ),
+            TransferState::Failed => ("FAILED", Color32::from_rgb(76, 22, 26), COLOR_DANGER),
+            TransferState::Cancelled => {
+                ("CANCELLED", Color32::from_rgb(64, 46, 16), COLOR_WARNING)
+            }
+            TransferState::Active => {
+                let msg_lower = self.status_message.to_lowercase();
+                if self.mode == AppMode::Receiver {
+                    if self.stats.is_none() {
+                        ("LISTENING", Color32::from_rgb(20, 46, 80), COLOR_PRIMARY)
+                    } else if msg_lower.contains("verif")
+                        || msg_lower.contains("sha")
+                        || msg_lower.contains("hash")
+                    {
+                        (
+                            "VERIFYING_HASH",
+                            Color32::from_rgb(46, 34, 76),
+                            Color32::from_rgb(180, 150, 240),
+                        )
+                    } else if let Some(st) = &self.stats {
+                        if st.corrupt_packets_dropped > 0 || st.retransmissions > 0 {
+                            (
+                                "RECOVERING_LOSS",
+                                Color32::from_rgb(76, 48, 16),
+                                COLOR_WARNING,
+                            )
+                        } else {
+                            ("RECEIVING", Color32::from_rgb(22, 58, 42), COLOR_SUCCESS)
+                        }
+                    } else {
+                        ("RECEIVING", Color32::from_rgb(22, 58, 42), COLOR_SUCCESS)
+                    }
+                } else if self.stats.is_none() {
+                    ("CONNECTING", Color32::from_rgb(20, 46, 80), COLOR_PRIMARY)
+                } else if msg_lower.contains("verif")
+                    || msg_lower.contains("sha")
+                    || msg_lower.contains("hash")
+                {
+                    (
+                        "VERIFYING_HASH",
+                        Color32::from_rgb(46, 34, 76),
+                        Color32::from_rgb(180, 150, 240),
+                    )
+                } else if let Some(st) = &self.stats {
+                    if st.retransmissions > 0 && st.in_flight_count > 0 {
+                        (
+                            "RECOVERING_LOSS",
+                            Color32::from_rgb(76, 48, 16),
+                            COLOR_WARNING,
+                        )
+                    } else if st.chunks_transferred == st.total_chunks && st.in_flight_count > 0 {
+                        (
+                            "WAITING_FOR_ACKS",
+                            Color32::from_rgb(72, 50, 16),
+                            COLOR_WARNING,
+                        )
+                    } else {
+                        ("TRANSFERRING", Color32::from_rgb(22, 50, 92), COLOR_PRIMARY)
+                    }
+                } else {
+                    ("TRANSFERRING", Color32::from_rgb(22, 50, 92), COLOR_PRIMARY)
+                }
+            }
+        }
     }
 }
 
@@ -382,123 +459,193 @@ impl eframe::App for TransferApp {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            // Header
-            ui.horizontal(|ui| {
-                ui.heading(
-                    RichText::new("Reliable UDP File Transfer — Protocol Observability Dashboard")
-                        .color(COLOR_PRIMARY)
-                        .size(19.0)
-                        .strong(),
-                );
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui.button("Refresh IP").clicked() {
-                        self.refresh_local_ip();
-                    }
-                    ui.label(
-                        RichText::new(format!("Local IP: {}", self.local_ip))
-                            .color(Color32::LIGHT_GRAY),
-                    );
-                });
+        // Dedicated fixed application header bar (desktop utility style)
+        egui::TopBottomPanel::top("header_panel")
+            .frame(
+                egui::Frame::none()
+                    .fill(COLOR_CARD_BG)
+                    .stroke(Stroke::new(1.0_f32, COLOR_CARD_BORDER))
+                    .inner_margin(egui::Margin::symmetric(14.0_f32, 8.0_f32)),
+            )
+            .show(ctx, |ui| {
+                self.render_header(ui);
             });
 
-            ui.add_space(4.0);
+        // Main dashboard workspace area
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::none()
+                    .fill(crate::ui::theme::COLOR_PANEL_BG)
+                    .inner_margin(egui::Margin::same(10.0_f32)),
+            )
+            .show(ctx, |ui| {
+                ScrollArea::vertical()
+                    .id_salt("main_dashboard_scroll")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        // 1. Configuration Panel
+                        egui::Frame::none()
+                            .fill(COLOR_CARD_BG)
+                            .stroke(Stroke::new(1.0_f32, COLOR_CARD_BORDER))
+                            .rounding(Rounding::same(3.0_f32))
+                            .inner_margin(10.0_f32)
+                            .show(ui, |ui| match self.mode {
+                                AppMode::Sender => self.render_sender_config(ui),
+                                AppMode::Receiver => self.render_receiver_config(ui),
+                            });
 
-            // Mode Selector Tabs (Sender / Receiver)
-            ui.horizontal(|ui| {
-                let is_active = self.state == TransferState::Active;
-                ui.add_enabled_ui(!is_active, |ui| {
-                    ui.selectable_value(
-                        &mut self.mode,
-                        AppMode::Sender,
-                        RichText::new("  Sender Mode  ").size(14.0).strong(),
-                    );
-                    ui.selectable_value(
-                        &mut self.mode,
-                        AppMode::Receiver,
-                        RichText::new("  Receiver Mode  ").size(14.0).strong(),
-                    );
-                });
+                        ui.add_space(6.0_f32);
 
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    match self.state {
-                        TransferState::Idle => ui.label(RichText::new("IDLE").color(Color32::GRAY)),
-                        TransferState::Active => {
-                            ui.label(RichText::new("RUNNING").color(COLOR_PRIMARY).strong())
-                        }
-                        TransferState::Completed => {
-                            ui.label(RichText::new("COMPLETED").color(COLOR_SUCCESS).strong())
-                        }
-                        TransferState::Failed => {
-                            ui.label(RichText::new("FAILED").color(COLOR_DANGER).strong())
-                        }
-                        TransferState::Cancelled => {
-                            ui.label(RichText::new("CANCELLED").color(COLOR_WARNING))
-                        }
-                    };
-                });
+                        // 2. Technical Metrics Grid
+                        egui::Frame::none()
+                            .fill(COLOR_CARD_BG)
+                            .stroke(Stroke::new(1.0_f32, COLOR_CARD_BORDER))
+                            .rounding(Rounding::same(3.0_f32))
+                            .inner_margin(10.0_f32)
+                            .show(ui, |ui| {
+                                self.render_metrics_panel(ui);
+                            });
+
+                        ui.add_space(6.0_f32);
+
+                        // 3. Sliding-Window & SACK Packet Matrix Dashboard
+                        egui::Frame::none()
+                            .fill(COLOR_CARD_BG)
+                            .stroke(Stroke::new(1.0_f32, COLOR_CARD_BORDER))
+                            .rounding(Rounding::same(3.0_f32))
+                            .inner_margin(10.0_f32)
+                            .show(ui, |ui| {
+                                self.render_packet_matrix_dashboard(ui);
+                            });
+
+                        ui.add_space(6.0_f32);
+
+                        // 4. Structured Protocol Event Timeline & Logs Panel
+                        self.render_timeline_panel(ui);
+                    });
             });
-
-            ui.separator();
-
-            ScrollArea::vertical()
-                .id_salt("main_dashboard_scroll")
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    // 1. Main Configuration Card
-                    egui::Frame::none()
-                        .fill(COLOR_CARD_BG)
-                        .stroke(Stroke::new(1.0_f32, COLOR_CARD_BORDER))
-                        .rounding(8.0_f32)
-                        .inner_margin(10.0_f32)
-                        .show(ui, |ui| match self.mode {
-                            AppMode::Sender => self.render_sender_config(ui),
-                            AppMode::Receiver => self.render_receiver_config(ui),
-                        });
-
-                    ui.add_space(6.0);
-
-                    // 2. Live Transfer Metrics Card
-                    egui::Frame::none()
-                        .fill(COLOR_CARD_BG)
-                        .stroke(Stroke::new(1.0_f32, COLOR_CARD_BORDER))
-                        .rounding(8.0_f32)
-                        .inner_margin(10.0_f32)
-                        .show(ui, |ui| {
-                            self.render_metrics_panel(ui);
-                        });
-
-                    ui.add_space(6.0);
-
-                    // 3. Live Packet Matrix & Sliding Window Observability Card
-                    egui::Frame::none()
-                        .fill(COLOR_CARD_BG)
-                        .stroke(Stroke::new(1.0_f32, COLOR_CARD_BORDER))
-                        .rounding(8.0_f32)
-                        .inner_margin(10.0_f32)
-                        .show(ui, |ui| {
-                            self.render_packet_matrix_dashboard(ui);
-                        });
-
-                    ui.add_space(6.0);
-
-                    // 4. Protocol Event Timeline & Logs Panel
-                    self.render_timeline_panel(ui);
-                });
-        });
     }
 }
 
 impl TransferApp {
+    fn render_header(&mut self, ui: &mut Ui) {
+        ui.horizontal(|ui| {
+            // Left: Title and protocol spec summary
+            ui.vertical(|ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new("Reliable UDP File Transfer (RFTP)")
+                            .size(15.0)
+                            .strong()
+                            .color(COLOR_TEXT_PRIMARY),
+                    );
+                    ui.label(
+                        RichText::new("v1.0")
+                            .size(11.0)
+                            .monospace()
+                            .color(COLOR_TEXT_MUTED),
+                    );
+                });
+                ui.label(
+                    RichText::new("Selective Repeat SACK · CRC32 & SHA-256 · Karn's Algorithm RTT/RTO")
+                        .size(10.5)
+                        .color(COLOR_TEXT_MUTED),
+                );
+            });
+
+            ui.add_space(16.0_f32);
+
+            // Center: Segmented mode tabs (Sender / Receiver)
+            let is_active = self.state == TransferState::Active;
+            ui.add_enabled_ui(!is_active, |ui| {
+                ui.horizontal(|ui| {
+                    let sender_selected = self.mode == AppMode::Sender;
+                    let receiver_selected = self.mode == AppMode::Receiver;
+
+                    if render_segment_tab(ui, "Sender Mode", sender_selected) {
+                        self.mode = AppMode::Sender;
+                    }
+                    if render_segment_tab(ui, "Receiver Mode", receiver_selected) {
+                        self.mode = AppMode::Receiver;
+                    }
+                });
+            });
+
+            // Right: Local IP and Technical State Badge
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let (state_text, state_bg, state_fg) = self.compute_detailed_state();
+                egui::Frame::none()
+                    .fill(state_bg)
+                    .stroke(Stroke::new(1.0_f32, state_fg))
+                    .rounding(Rounding::same(3.0_f32))
+                    .inner_margin(egui::Margin::symmetric(8.0_f32, 3.0_f32))
+                    .show(ui, |ui| {
+                        ui.label(
+                            RichText::new(state_text)
+                                .size(11.0)
+                                .monospace()
+                                .strong()
+                                .color(state_fg),
+                        );
+                    });
+
+                ui.separator();
+
+                if ui
+                    .add_enabled(!is_active, Button::new("⟳ Refresh"))
+                    .on_hover_text("Re-query local network interface IP addresses")
+                    .clicked()
+                {
+                    self.refresh_local_ip();
+                }
+
+                ui.label(
+                    RichText::new(format!("Local: {}", self.local_ip))
+                        .size(11.5)
+                        .monospace()
+                        .color(COLOR_TEXT_SECONDARY),
+                );
+            });
+        });
+    }
+
     fn render_sender_config(&mut self, ui: &mut Ui) {
         let is_active = self.state == TransferState::Active;
 
         ui.horizontal(|ui| {
-            ui.label("File to Send:");
+            ui.label(
+                RichText::new("SENDER CONFIGURATION & TRANSMISSION TARGET")
+                    .size(11.0)
+                    .strong()
+                    .color(COLOR_TEXT_SECONDARY),
+            );
+        });
+
+        ui.add_space(4.0_f32);
+
+        // Row 1: Source File Selection with live file metadata inspection
+        let file_path_obj = Path::new(&self.selected_file_path);
+        let file_exists = !self.selected_file_path.is_empty() && file_path_obj.exists();
+        let file_size_opt = if file_exists {
+            file_path_obj.metadata().ok().map(|m| m.len())
+        } else {
+            None
+        };
+
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new("Source File:")
+                    .size(12.0)
+                    .color(COLOR_TEXT_PRIMARY),
+            );
+
             ui.add_enabled(
                 !is_active,
-                egui::TextEdit::singleline(&mut self.selected_file_path).desired_width(340.0),
+                egui::TextEdit::singleline(&mut self.selected_file_path)
+                    .desired_width(ui.available_width() - 95.0_f32)
+                    .hint_text("Select or enter path to file to send..."),
             );
+
             if ui
                 .add_enabled(!is_active, Button::new("Browse..."))
                 .clicked()
@@ -509,74 +656,144 @@ impl TransferApp {
             }
         });
 
-        ui.add_space(4.0);
+        // File validation feedback
+        if !self.selected_file_path.is_empty() {
+            ui.horizontal(|ui| {
+                if let Some(bytes) = file_size_opt {
+                    let total_chunks = (bytes + self.chunk_size as u64 - 1) / (self.chunk_size as u64).max(1);
+                    ui.label(
+                        RichText::new(format!(
+                            "File Size: {} ({} B) | Calculated Payload Chunks: {} chunks",
+                            format_file_size(bytes),
+                            bytes,
+                            total_chunks
+                        ))
+                        .size(11.0)
+                        .monospace()
+                        .color(COLOR_SUCCESS),
+                    );
+                } else {
+                    ui.label(
+                        RichText::new("Warning: File does not exist on disk.")
+                            .size(11.0)
+                            .color(COLOR_DANGER),
+                    );
+                }
+            });
+        }
 
-        ui.horizontal(|ui| {
-            ui.label("Receiver IP:");
+        ui.add_space(4.0_f32);
+
+        // Row 2: Target parameters (IP, Port, Window, Loss)
+        let ip_valid = self.target_ip.trim().parse::<IpAddr>().is_ok();
+        ui.horizontal_wrapped(|ui| {
+            ui.label(
+                RichText::new("Destination IP:")
+                    .size(12.0)
+                    .color(COLOR_TEXT_PRIMARY),
+            );
             ui.add_enabled(
                 !is_active,
-                egui::TextEdit::singleline(&mut self.target_ip).desired_width(130.0),
+                egui::TextEdit::singleline(&mut self.target_ip).desired_width(120.0_f32),
             );
+            if !ip_valid {
+                ui.label(RichText::new("Invalid IP").size(11.0).color(COLOR_DANGER));
+            }
 
-            ui.label("Port:");
+            ui.separator();
+
+            ui.label(RichText::new("Port:").size(12.0).color(COLOR_TEXT_PRIMARY));
             let mut port_str = self.port.to_string();
             if ui
                 .add_enabled(
                     !is_active,
-                    egui::TextEdit::singleline(&mut port_str).desired_width(55.0),
+                    egui::TextEdit::singleline(&mut port_str).desired_width(52.0_f32),
                 )
                 .changed()
             {
                 if let Ok(p) = port_str.parse() {
-                    self.port = p;
+                    if p > 0 {
+                        self.port = p;
+                    }
                 }
             }
 
-            ui.label("Window:");
+            ui.separator();
+
+            ui.label(
+                RichText::new("Sliding Window:")
+                    .size(12.0)
+                    .color(COLOR_TEXT_PRIMARY),
+            );
             ui.add_enabled(
                 !is_active,
                 egui::Slider::new(&mut self.window_size, 1..=64).text("pkts"),
             );
 
-            ui.label("Sim. Drop:");
+            ui.separator();
+
+            ui.label(
+                RichText::new("Synthetic Drop:")
+                    .size(12.0)
+                    .color(COLOR_TEXT_PRIMARY),
+            )
+            .on_hover_text(
+                "Artificial drop rate injected on socket for protocol evaluation. This is a synthetic test condition, not physical wire loss.",
+            );
             ui.add_enabled(
                 !is_active,
-                egui::Slider::new(&mut self.simulated_loss_percent, 0..=50).text("%"),
+                egui::Slider::new(&mut self.simulated_loss_percent, 0..=50).text("% drop"),
             );
         });
 
-        ui.add_space(6.0);
+        ui.add_space(6.0_f32);
 
+        // Row 3: Action Buttons & Inline Status
         ui.horizontal(|ui| {
+            let can_start = !is_active && file_exists && ip_valid;
+
             if !is_active {
+                let start_btn = Button::new(
+                    RichText::new("  Start Transfer  ")
+                        .color(Color32::WHITE)
+                        .strong(),
+                )
+                .fill(COLOR_PRIMARY);
+
                 if ui
-                    .button(
-                        RichText::new("  Start Transfer  ")
-                            .color(Color32::WHITE)
-                            .strong(),
-                    )
+                    .add_enabled(can_start, start_btn)
+                    .on_disabled_hover_text("Select a valid existing file and destination IP address to start.")
                     .clicked()
                 {
                     self.start_sender();
                 }
-            } else if ui
-                .button(
+            } else {
+                let cancel_btn = Button::new(
                     RichText::new("  Cancel Transfer  ")
-                        .color(COLOR_DANGER)
+                        .color(Color32::WHITE)
                         .strong(),
                 )
-                .clicked()
-            {
-                self.cancel_transfer();
+                .fill(COLOR_DANGER);
+
+                if ui.add(cancel_btn).clicked() {
+                    self.cancel_transfer();
+                }
             }
 
             if (self.state == TransferState::Failed || self.state == TransferState::Completed)
-                && ui.button("Retry").clicked()
+                && ui.add_enabled(can_start, Button::new("Retry Transfer")).clicked()
             {
                 self.start_sender();
             }
 
-            ui.label(RichText::new(&self.status_message).color(Color32::LIGHT_GRAY));
+            ui.separator();
+
+            ui.label(
+                RichText::new(&self.status_message)
+                    .size(11.5)
+                    .monospace()
+                    .color(COLOR_TEXT_SECONDARY),
+            );
         });
     }
 
@@ -584,10 +801,28 @@ impl TransferApp {
         let is_active = self.state == TransferState::Active;
 
         ui.horizontal(|ui| {
-            ui.label("Save Directory:");
+            ui.label(
+                RichText::new("RECEIVER CONFIGURATION & LISTENER BINDING")
+                    .size(11.0)
+                    .strong()
+                    .color(COLOR_TEXT_SECONDARY),
+            );
+        });
+
+        ui.add_space(4.0_f32);
+
+        // Row 1: Save Directory
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new("Download Directory:")
+                    .size(12.0)
+                    .color(COLOR_TEXT_PRIMARY),
+            );
             ui.add_enabled(
                 !is_active,
-                egui::TextEdit::singleline(&mut self.destination_dir).desired_width(340.0),
+                egui::TextEdit::singleline(&mut self.destination_dir)
+                    .desired_width(ui.available_width() - 95.0_f32)
+                    .hint_text("Directory where incoming files will be written..."),
             );
             if ui
                 .add_enabled(!is_active, Button::new("Browse..."))
@@ -599,57 +834,82 @@ impl TransferApp {
             }
         });
 
-        ui.add_space(4.0);
+        ui.add_space(4.0_f32);
 
-        ui.horizontal(|ui| {
-            ui.label("Listening Port:");
+        // Row 2: Port & Synthetic Drop
+        ui.horizontal_wrapped(|ui| {
+            ui.label(
+                RichText::new("Listening Port:")
+                    .size(12.0)
+                    .color(COLOR_TEXT_PRIMARY),
+            );
             let mut port_str = self.port.to_string();
             if ui
                 .add_enabled(
                     !is_active,
-                    egui::TextEdit::singleline(&mut port_str).desired_width(60.0),
+                    egui::TextEdit::singleline(&mut port_str).desired_width(55.0_f32),
                 )
                 .changed()
             {
                 if let Ok(p) = port_str.parse() {
-                    self.port = p;
+                    if p > 0 {
+                        self.port = p;
+                    }
                 }
             }
 
-            ui.label("Configured Sim. Drop:");
+            ui.separator();
+
+            ui.label(
+                RichText::new("Synthetic Drop:")
+                    .size(12.0)
+                    .color(COLOR_TEXT_PRIMARY),
+            )
+            .on_hover_text(
+                "Artificial drop rate injected on incoming UDP packets for testing out-of-order SACK buffering.",
+            );
             ui.add_enabled(
                 !is_active,
-                egui::Slider::new(&mut self.simulated_loss_percent, 0..=50)
-                    .text("% synthetic drop"),
+                egui::Slider::new(&mut self.simulated_loss_percent, 0..=50).text("% drop"),
             );
         });
 
-        ui.add_space(6.0);
+        ui.add_space(6.0_f32);
 
+        // Row 3: Action Buttons & Inline Status
         ui.horizontal(|ui| {
             if !is_active {
-                if ui
-                    .button(
-                        RichText::new("  Start Listening  ")
-                            .color(Color32::WHITE)
-                            .strong(),
-                    )
-                    .clicked()
-                {
-                    self.start_receiver();
-                }
-            } else if ui
-                .button(
-                    RichText::new("  Stop Listening  ")
-                        .color(COLOR_DANGER)
+                let listen_btn = Button::new(
+                    RichText::new("  Start Listening  ")
+                        .color(Color32::WHITE)
                         .strong(),
                 )
-                .clicked()
-            {
-                self.cancel_transfer();
+                .fill(COLOR_PRIMARY);
+
+                if ui.add(listen_btn).clicked() {
+                    self.start_receiver();
+                }
+            } else {
+                let stop_btn = Button::new(
+                    RichText::new("  Stop Listening  ")
+                        .color(Color32::WHITE)
+                        .strong(),
+                )
+                .fill(COLOR_DANGER);
+
+                if ui.add(stop_btn).clicked() {
+                    self.cancel_transfer();
+                }
             }
 
-            ui.label(RichText::new(&self.status_message).color(Color32::LIGHT_GRAY));
+            ui.separator();
+
+            ui.label(
+                RichText::new(&self.status_message)
+                    .size(11.5)
+                    .monospace()
+                    .color(COLOR_TEXT_SECONDARY),
+            );
         });
     }
 
@@ -658,7 +918,7 @@ impl TransferApp {
 
         let (
             progress,
-            speed,
+            speed_val,
             bytes_str,
             acked_str,
             in_flight_str,
@@ -671,12 +931,12 @@ impl TransferApp {
             Some(st) => {
                 let rtt_s = st
                     .current_rtt
-                    .map(|r| format!("{:.1}ms", r.as_secs_f64() * 1000.0))
-                    .unwrap_or_else(|| "N/A".to_string());
+                    .map(|r| format!("{:.1} ms", r.as_secs_f64() * 1000.0))
+                    .unwrap_or_else(|| "--".to_string());
                 let rto_s = st
                     .current_rto
-                    .map(|r| format!("{:.0}ms", r.as_secs_f64() * 1000.0))
-                    .unwrap_or_else(|| "N/A".to_string());
+                    .map(|r| format!("{:.0} ms", r.as_secs_f64() * 1000.0))
+                    .unwrap_or_else(|| "--".to_string());
                 let pkt_label = match st.perspective {
                     WindowPerspective::Sender => {
                         format!(
@@ -710,7 +970,7 @@ impl TransferApp {
                     st.formatted_speed(),
                     st.formatted_bytes(),
                     format!(
-                        "{}/{} (Base #{})",
+                        "#{}/#{} (Base #{})",
                         st.chunks_transferred, st.total_chunks, st.window_base
                     ),
                     inflight_label,
@@ -720,7 +980,7 @@ impl TransferApp {
                         st.retransmissions,
                         st.corrupt_packets_dropped + st.duplicate_packets_dropped
                     ),
-                    format!("{}% (Synthetic)", st.configured_loss_percent),
+                    format!("{}% (Synthetic Drop)", st.configured_loss_percent),
                     format!("{} / {}", rtt_s, rto_s),
                     st.estimated_remaining()
                         .map(|e| format!("{:.1}s", e.as_secs_f64()))
@@ -729,145 +989,218 @@ impl TransferApp {
             }
             None => (
                 0.0,
-                "0 B/s".to_string(),
-                "0 B / 0 B".to_string(),
-                "0/0 (Base #0)".to_string(),
-                "0 in-flight (0 SACKed)".to_string(),
-                "0 DATA / 0 ACK".to_string(),
-                "0 retries (0 drops)".to_string(),
-                format!("{}% (Synthetic)", self.simulated_loss_percent),
+                "--".to_string(),
+                "-- / --".to_string(),
+                "--".to_string(),
+                "--".to_string(),
+                "--".to_string(),
+                "--".to_string(),
+                format!("{}% (Synthetic Drop)", self.simulated_loss_percent),
                 "-- / --".to_string(),
                 "--".to_string(),
             ),
         };
 
+        // Compact technical progress bar
         ui.add(
             ProgressBar::new(progress)
                 .show_percentage()
                 .animate(self.state == TransferState::Active && !self.vis_paused),
         );
 
-        ui.add_space(6.0);
+        ui.add_space(6.0_f32);
 
-        // Row 1 of metrics
+        // Technical 4-column structured metrics grid with tabular numerals
         ui.columns(4, |cols| {
+            // Col 0: Throughput
             cols[0].vertical(|ui| {
-                ui.label(RichText::new("Throughput").size(11.0).color(Color32::GRAY));
                 ui.label(
-                    RichText::new(speed)
+                    RichText::new("THROUGHPUT")
+                        .size(10.0)
+                        .strong()
+                        .color(COLOR_TEXT_MUTED),
+                );
+                ui.label(
+                    RichText::new(speed_val)
                         .size(14.0)
+                        .monospace()
                         .strong()
                         .color(COLOR_PRIMARY),
                 );
             });
+
+            // Col 1: Progress & Volume
             cols[1].vertical(|ui| {
-                ui.label(RichText::new("Bytes & ETA").size(11.0).color(Color32::GRAY));
+                ui.label(
+                    RichText::new("TRANSFERRED & ETA")
+                        .size(10.0)
+                        .strong()
+                        .color(COLOR_TEXT_MUTED),
+                );
                 ui.label(
                     RichText::new(format!("{} (ETA {})", bytes_str, eta_str))
-                        .size(13.0)
-                        .strong(),
+                        .size(12.5)
+                        .monospace()
+                        .strong()
+                        .color(COLOR_TEXT_PRIMARY),
                 );
             });
+
+            // Col 2: Window Base & Chunks
             cols[2].vertical(|ui| {
                 ui.label(
-                    RichText::new("Acked Chunks & Base")
-                        .size(11.0)
-                        .color(Color32::GRAY),
+                    RichText::new("CUMULATIVE BASE & CHUNKS")
+                        .size(10.0)
+                        .strong()
+                        .color(COLOR_TEXT_MUTED),
                 );
                 ui.label(
                     RichText::new(acked_str)
-                        .size(13.0)
+                        .size(12.5)
+                        .monospace()
                         .strong()
                         .color(COLOR_SUCCESS),
                 );
             });
+
+            // Col 3: Karn RTT / Dynamic RTO
             cols[3].vertical(|ui| {
                 ui.label(
-                    RichText::new("RTT (Karn) / Dynamic RTO")
-                        .size(11.0)
-                        .color(Color32::GRAY),
+                    RichText::new("RTT (KARN) / DYNAMIC RTO")
+                        .size(10.0)
+                        .strong()
+                        .color(COLOR_TEXT_MUTED),
                 );
-                ui.label(RichText::new(rtt_rto_str).size(13.0).strong());
+                ui.label(
+                    RichText::new(rtt_rto_str)
+                        .size(12.5)
+                        .monospace()
+                        .strong()
+                        .color(COLOR_TEXT_PRIMARY),
+                );
             });
         });
 
-        ui.add_space(4.0);
+        ui.add_space(4.0_f32);
 
-        // Row 2 of metrics (Explicitly distinguishing Configured Simulated Loss from Observed Retransmissions)
+        // Row 2 of metrics
         ui.columns(4, |cols| {
             cols[0].vertical(|ui| {
-                ui.label(RichText::new("Packets Transmitted").size(11.0).color(Color32::GRAY));
-                ui.label(RichText::new(pkts_str).size(12.5).strong());
+                ui.label(
+                    RichText::new("PACKET TRAFFIC")
+                        .size(10.0)
+                        .strong()
+                        .color(COLOR_TEXT_MUTED),
+                );
+                ui.label(
+                    RichText::new(pkts_str)
+                        .size(11.5)
+                        .monospace()
+                        .strong()
+                        .color(COLOR_TEXT_PRIMARY),
+                );
             });
+
             cols[1].vertical(|ui| {
-                ui.label(RichText::new("Window Occupancy").size(11.0).color(Color32::GRAY));
-                ui.label(RichText::new(in_flight_str).size(12.5).strong());
+                ui.label(
+                    RichText::new("WINDOW OCCUPANCY")
+                        .size(10.0)
+                        .strong()
+                        .color(COLOR_TEXT_MUTED),
+                );
+                ui.label(
+                    RichText::new(in_flight_str)
+                        .size(11.5)
+                        .monospace()
+                        .strong()
+                        .color(COLOR_INFO),
+                );
             });
+
             cols[2].vertical(|ui| {
                 ui.label(
-                    RichText::new("Observed Retransmissions")
-                        .size(11.0)
-                        .color(Color32::GRAY),
+                    RichText::new("ACTUAL RETRANSMISSIONS")
+                        .size(10.0)
+                        .strong()
+                        .color(COLOR_TEXT_MUTED),
                 )
                 .on_hover_text(
-                    "Actual protocol retransmissions triggered by RTO timeouts (Sender) or observed via FLAG_RETRANSMISSION (Receiver).",
+                    "Observed protocol retransmissions triggered by RTO timeout or wire flag.",
                 );
-                ui.label(RichText::new(retrans_str).size(12.5).strong().color(COLOR_WARNING));
+                ui.label(
+                    RichText::new(retrans_str)
+                        .size(11.5)
+                        .monospace()
+                        .strong()
+                        .color(COLOR_WARNING),
+                );
             });
+
             cols[3].vertical(|ui| {
                 ui.label(
-                    RichText::new("Configured Sim. Drop (Not Measured Loss)")
-                        .size(11.0)
-                        .color(Color32::GRAY),
+                    RichText::new("SIMULATED LOSS (TEST)")
+                        .size(10.0)
+                        .strong()
+                        .color(COLOR_TEXT_MUTED),
                 )
                 .on_hover_text(
-                    "Artificial drop probability configured on ReliableUdpSocket for testing. This is a synthetic setting, not a measured physical network loss rate.",
+                    "Synthetic drop probability configured for evaluation. This is a testing configuration, not a measured network loss rate.",
                 );
-                ui.label(RichText::new(sim_loss_str).size(12.5).strong());
+                ui.label(
+                    RichText::new(sim_loss_str)
+                        .size(11.5)
+                        .monospace()
+                        .color(COLOR_TEXT_MUTED),
+                );
             });
         });
     }
 
     fn render_packet_matrix_dashboard(&mut self, ui: &mut Ui) {
-        // Top bar: Title + Perspective Selector + Pause/Replay Controls
+        // Toolbar: Title + Perspective Selector + Pause/Replay Controls
         ui.horizontal_wrapped(|ui| {
             ui.label(
-                RichText::new("Live Sliding Window & SACK Packet Matrix")
-                    .size(14.0)
+                RichText::new("SLIDING WINDOW & SACK PACKET MATRIX")
+                    .size(11.0)
                     .strong()
-                    .color(COLOR_PRIMARY),
+                    .color(COLOR_TEXT_SECONDARY),
             );
 
             ui.separator();
-            ui.label(RichText::new("Perspective:").size(12.0).color(Color32::GRAY));
+
+            ui.label(
+                RichText::new("Perspective:")
+                    .size(11.5)
+                    .color(COLOR_TEXT_MUTED),
+            );
             ui.selectable_value(
                 &mut self.perspective_selection,
                 PerspectiveSelection::Auto,
-                RichText::new("Auto").size(12.0),
+                RichText::new("Auto").size(11.5),
             );
             ui.selectable_value(
                 &mut self.perspective_selection,
                 PerspectiveSelection::SenderWindow,
-                RichText::new("Sender Window").size(12.0),
+                RichText::new("Sender Window").size(11.5),
             );
             ui.selectable_value(
                 &mut self.perspective_selection,
                 PerspectiveSelection::ReceiverBuffer,
-                RichText::new("Receiver SACK Buffer").size(12.0),
+                RichText::new("Receiver SACK Buffer").size(11.5),
             );
 
             ui.separator();
 
-            // Demonstration Controls: Pause/Resume Visualization (never pauses network worker)
+            // Demonstration Controls: Pause/Resume Visualization (never pauses background network worker)
             let pause_label = if self.vis_paused {
-                RichText::new("▶ Resume Live Vis").color(COLOR_SUCCESS).size(12.0).strong()
+                RichText::new("▶ Resume Live").color(COLOR_SUCCESS).size(11.5).strong()
             } else {
-                RichText::new("⏸ Pause Vis").color(COLOR_WARNING).size(12.0)
+                RichText::new("⏸ Pause Display").color(COLOR_WARNING).size(11.5)
             };
             if ui
                 .button(pause_label)
                 .on_hover_text(
-                    "Freezes the matrix display for inspection while the network worker continues running at full speed in the background.",
+                    "Freezes the packet matrix display for inspection while the network worker continues transferring at full speed in the background.",
                 )
                 .clicked()
             {
@@ -889,7 +1222,7 @@ impl TransferApp {
 
                 if ui
                     .add_enabled(current_idx > 0, Button::new("◀ Step"))
-                    .on_hover_text("Step backward one 100ms snapshot frame")
+                    .on_hover_text("Step backward one snapshot frame")
                     .clicked()
                 {
                     self.vis_paused = true;
@@ -897,7 +1230,7 @@ impl TransferApp {
                 }
                 if ui
                     .add_enabled(current_idx + 1 < history_len, Button::new("Step ▶"))
-                    .on_hover_text("Step forward one 100ms snapshot frame")
+                    .on_hover_text("Step forward one snapshot frame")
                     .clicked()
                 {
                     self.vis_paused = true;
@@ -917,15 +1250,16 @@ impl TransferApp {
             }
         });
 
-        ui.add_space(4.0);
+        ui.add_space(4.0_f32);
 
-        // Clone the active snapshot for rendering so `self` can be mutated on cell click (pinning)
+        // Snapshot inspection
         let Some(st) = self.active_display_stats().cloned() else {
             ui.label(
                 RichText::new(
-                    "No active transfer snapshot yet. Start a transfer or receiver to inspect live sliding-window and SACK telemetry.",
+                    "No active transfer telemetry. Start a transfer or listener to inspect live sliding-window and SACK protocol state.",
                 )
-                .color(Color32::GRAY),
+                .size(11.5)
+                .color(COLOR_TEXT_MUTED),
             );
             return;
         };
@@ -951,28 +1285,28 @@ impl TransferApp {
                     "Authoritative Receiver Out-of-Order Buffer"
                 }
                 (WindowPerspective::Receiver, WindowPerspective::Sender) => {
-                    "Sender View (Limited: Receiver only observes arrived packets)"
+                    "Sender View (Limited to arrived packets)"
                 }
             };
             ui.label(
                 RichText::new(format!("[{}]", role_text))
                     .color(COLOR_PRIMARY)
                     .strong()
-                    .size(12.0),
+                    .size(11.5),
             );
             ui.separator();
             ui.label(
-                RichText::new(format!("Cumulative Base (ack_num): #{}", st.window_base))
+                RichText::new(format!("Base (ack_num): #{}", st.window_base))
                     .color(COLOR_SUCCESS)
                     .monospace()
-                    .size(12.0),
+                    .size(11.5),
             );
             ui.separator();
             let seq_label = match st.perspective {
                 WindowPerspective::Sender => format!("Next Seq: #{}", st.next_seq),
-                WindowPerspective::Receiver => format!("Highest Observed + 1: #{}", st.next_seq),
+                WindowPerspective::Receiver => format!("Highest Observed: #{}", st.next_seq.saturating_sub(1)),
             };
-            ui.label(RichText::new(seq_label).monospace().size(12.0));
+            ui.label(RichText::new(seq_label).monospace().size(11.5));
             ui.separator();
             ui.label(
                 RichText::new(format!(
@@ -981,35 +1315,23 @@ impl TransferApp {
                 ))
                 .color(COLOR_WINDOW_HIGHLIGHT)
                 .monospace()
-                .size(12.0),
+                .size(11.5),
             );
             ui.separator();
             ui.label(
-                RichText::new(format!("SACK Mask: 0x{:016X}", st.last_sack_bitmask))
+                RichText::new(format!("SACK Bitmask: 0x{:016X}", st.last_sack_bitmask))
                     .color(COLOR_WARNING)
                     .monospace()
-                    .size(12.0),
+                    .size(11.5),
             );
         });
 
-        if st.perspective == WindowPerspective::Receiver
-            && effective_perspective == WindowPerspective::Sender
-        {
-            ui.label(
-                RichText::new(
-                    "Note: Receiver cannot observe sender-internal unreceived next_seq or RTO timers before packets arrive on the wire.",
-                )
-                .size(11.0)
-                .color(COLOR_WARNING),
-            );
-        }
-
-        ui.add_space(4.0);
+        ui.add_space(4.0_f32);
 
         // Full-File Minimap Bar
         self.render_full_file_minimap(ui, &st, window_end);
 
-        ui.add_space(6.0);
+        ui.add_space(5.0_f32);
 
         // Project visible chunks according to selected perspective
         let displayed_chunks: Vec<ChunkSnapshot> = st
@@ -1039,35 +1361,35 @@ impl TransferApp {
             }
         }
 
-        // Legend with Color + Symbol + Shape cues
+        // Functional legend with color, shape cue, and symbol
         ui.horizontal_wrapped(|ui| {
             render_legend_badge(
                 ui,
                 COLOR_STATE_ACKED_BG,
                 COLOR_STATE_ACKED_BORDER,
                 &format!("✓ Acked ({})", count_acked),
-                "Cumulatively acknowledged (seq < base). Top bar + '✓' symbol.",
+                "Cumulatively acknowledged (seq < base). Top horizontal accent bar.",
             );
             render_legend_badge(
                 ui,
                 COLOR_STATE_SACKED_BG,
                 COLOR_STATE_SACKED_BORDER,
                 &format!("S SACKed ({})", count_sacked),
-                "Selectively acknowledged out-of-order (seq > base). Corner triangle + 'S' symbol.",
+                "Selectively acknowledged out-of-order (seq > base). Left vertical accent bar.",
             );
             render_legend_badge(
                 ui,
                 COLOR_STATE_RETRANS_BG,
                 COLOR_STATE_RETRANS_BORDER,
                 &format!("↻ Retransmitting ({})", count_retrans),
-                "RTO timeout expired; retry currently in-flight. Bottom warning bar + '↻' symbol.",
+                "RTO expired or retry in-flight. Bottom warning accent bar.",
             );
             render_legend_badge(
                 ui,
                 COLOR_STATE_INFLIGHT_BG,
                 COLOR_STATE_INFLIGHT_BORDER,
                 &format!("→ In-Flight / Gap ({})", count_inflight),
-                "Initial transmission in-flight (Sender) or unreceived sequence gap below highest seq (Receiver).",
+                "Transmission in-flight (Sender) or unreceived sequence gap (Receiver).",
             );
             render_legend_badge(
                 ui,
@@ -1077,27 +1399,26 @@ impl TransferApp {
                 "Not yet transmitted (seq >= next_seq).",
             );
             ui.label(
-                RichText::new(format!(
-                    "● Retrans History Dot ({})",
-                    count_retrans_history
-                ))
-                .size(11.5)
-                .color(COLOR_WARNING),
+                RichText::new(format!("● Retrans History ({})", count_retrans_history))
+                    .size(11.0)
+                    .color(COLOR_WARNING),
             )
             .on_hover_text(
-                "Orange/red top-right dot marks chunks that experienced >= 1 retransmission, preserved even after SACK or Cumulative ACK.",
+                "Orange corner marker identifies chunks that experienced >= 1 retransmission, preserved even after cumulative ACK.",
             );
         });
 
-        ui.add_space(4.0);
+        ui.add_space(4.0_f32);
 
-        // Render Matrix Grid (16 columns x up to 5 rows = 80 cells)
-        let cols = 16usize;
-        let spacing = 4.0f32;
-        let avail_width = ui.available_width().max(320.0);
-        let cell_width =
-            ((avail_width - spacing * (cols as f32 - 1.0)) / (cols as f32)).clamp(32.0, 56.0);
-        let cell_height = 24.0f32;
+        // Dynamically compute column count based on available window width
+        let avail_width = ui.available_width().max(320.0_f32);
+        let spacing = 3.0_f32;
+        let target_cell_width = 46.0_f32;
+        let cols = ((avail_width + spacing) / (target_cell_width + spacing))
+            .floor()
+            .clamp(16.0_f32, 28.0_f32) as usize;
+        let cell_width = ((avail_width - spacing * (cols as f32 - 1.0_f32)) / (cols as f32)).clamp(34.0_f32, 54.0_f32);
+        let cell_height = 23.0_f32;
 
         for row_chunks in displayed_chunks.chunks(cols) {
             ui.horizontal(|ui| {
@@ -1137,10 +1458,10 @@ impl TransferApp {
                     });
                 }
             });
-            ui.add_space(2.0);
+            ui.add_space(2.0_f32);
         }
 
-        ui.add_space(6.0);
+        ui.add_space(4.0_f32);
 
         // Pinned Chunk Inspector Panel
         self.render_pinned_chunk_inspector(ui, &st);
@@ -1154,90 +1475,90 @@ impl TransferApp {
         ui.horizontal(|ui| {
             ui.label(
                 RichText::new(format!(
-                    "Full-File Minimap (0..{}): Viewing chunks #{}..#{}",
+                    "File Chunk Minimap [0 .. #{}]: Viewing viewport #{}..#{}",
                     st.total_chunks, vis_start, vis_end
                 ))
-                .size(11.5)
-                .color(Color32::LIGHT_GRAY),
+                .size(11.0)
+                .monospace()
+                .color(COLOR_TEXT_MUTED),
             );
         });
 
-        let desired_size = Vec2::new(ui.available_width().max(200.0), 14.0);
+        let desired_size = Vec2::new(ui.available_width().max(200.0_f32), 11.0_f32);
         let (rect, resp) = ui.allocate_exact_size(desired_size, Sense::hover());
 
         if ui.is_rect_visible(rect) {
             let painter = ui.painter();
             // Background (Pending)
-            painter.rect_filled(rect, Rounding::same(4.0), COLOR_STATE_PENDING_BG);
+            painter.rect_filled(rect, Rounding::same(2.0_f32), COLOR_STATE_PENDING_BG);
 
             // Cumulatively ACKed region [0 .. window_base)
-            let ack_ratio = (st.window_base as f32 / total).clamp(0.0, 1.0);
-            if ack_ratio > 0.0 {
+            let ack_ratio = (st.window_base as f32 / total).clamp(0.0_f32, 1.0_f32);
+            if ack_ratio > 0.0_f32 {
                 let ack_rect = Rect::from_min_max(
                     rect.min,
                     Pos2::new(rect.min.x + rect.width() * ack_ratio, rect.max.y),
                 );
-                painter.rect_filled(ack_rect, Rounding::same(4.0), COLOR_STATE_ACKED_BORDER);
+                painter.rect_filled(ack_rect, Rounding::same(2.0_f32), COLOR_STATE_ACKED_BORDER);
             }
 
             // Active Window region [window_base .. window_end)
             let win_start_ratio = ack_ratio;
-            let win_end_ratio = (window_end as f32 / total).clamp(0.0, 1.0);
+            let win_end_ratio = (window_end as f32 / total).clamp(0.0_f32, 1.0_f32);
             if win_end_ratio > win_start_ratio {
                 let win_rect = Rect::from_min_max(
                     Pos2::new(rect.min.x + rect.width() * win_start_ratio, rect.min.y),
                     Pos2::new(
                         (rect.min.x + rect.width() * win_end_ratio)
-                            .max(rect.min.x + rect.width() * win_start_ratio + 3.0),
+                            .max(rect.min.x + rect.width() * win_start_ratio + 3.0_f32),
                         rect.max.y,
                     ),
                 );
-                painter.rect_filled(win_rect, Rounding::same(2.0), COLOR_WINDOW_HIGHLIGHT);
+                painter.rect_filled(win_rect, Rounding::same(1.0_f32), COLOR_WINDOW_HIGHLIGHT);
             }
 
             // Visible matrix viewport bracket [vis_start .. vis_end)
-            let vp_start_ratio = (vis_start as f32 / total).clamp(0.0, 1.0);
-            let vp_end_ratio = (vis_end as f32 / total).clamp(0.0, 1.0);
+            let vp_start_ratio = (vis_start as f32 / total).clamp(0.0_f32, 1.0_f32);
+            let vp_end_ratio = (vis_end as f32 / total).clamp(0.0_f32, 1.0_f32);
             let vp_rect = Rect::from_min_max(
                 Pos2::new(rect.min.x + rect.width() * vp_start_ratio, rect.min.y),
                 Pos2::new(
                     (rect.min.x + rect.width() * vp_end_ratio)
-                        .max(rect.min.x + rect.width() * vp_start_ratio + 4.0),
+                        .max(rect.min.x + rect.width() * vp_start_ratio + 3.0_f32),
                     rect.max.y,
                 ),
             );
             painter.rect_stroke(
                 vp_rect,
-                Rounding::same(3.0),
-                Stroke::new(1.5, Color32::WHITE),
+                Rounding::same(2.0_f32),
+                Stroke::new(1.0_f32, Color32::WHITE),
             );
         }
 
         resp.on_hover_text(format!(
-            "Full file: {} chunks\nCumulative Base: #{}\nActive Window: [#{}..#{})\nVisible Matrix Viewport: [#{}..#{})",
+            "Total Chunks: {}\nCumulative Base: #{}\nActive Sliding Window: [#{}..#{})\nVisible Matrix Viewport: [#{}..#{})",
             st.total_chunks, st.window_base, st.window_base, window_end, vis_start, vis_end
         ));
     }
 
     fn render_pinned_chunk_inspector(&mut self, ui: &mut Ui, st: &TransferStats) {
         egui::Frame::none()
-            .fill(Color32::from_rgb(18, 24, 36))
-            .stroke(Stroke::new(1.0, COLOR_CARD_BORDER))
-            .rounding(6.0)
-            .inner_margin(8.0)
+            .fill(Color32::from_rgb(17, 21, 29))
+            .stroke(Stroke::new(1.0_f32, COLOR_CARD_BORDER))
+            .rounding(Rounding::same(3.0_f32))
+            .inner_margin(8.0_f32)
             .show(ui, |ui| {
                 let Some(pinned_seq) = self.pinned_chunk_seq else {
                     ui.label(
                         RichText::new(
-                            "📌 Chunk Inspector: Hover any cell for live tooltip, or click any chunk cell to pin it here for detailed byte-offset & timestamp inspection.",
+                            "Chunk Inspector: Hover over any matrix cell for live telemetry, or click to pin byte-offsets & timestamps here.",
                         )
-                        .size(11.5)
-                        .color(Color32::GRAY),
+                        .size(11.0)
+                        .color(COLOR_TEXT_MUTED),
                     );
                     return;
                 };
 
-                // Look up in current visible chunks first, then fallback to cache, or synthesize if < base / >= next_seq
                 let chunk = st
                     .visible_chunks
                     .iter()
@@ -1273,10 +1594,11 @@ impl TransferApp {
 
                 ui.horizontal_wrapped(|ui| {
                     ui.label(
-                        RichText::new(format!("📌 Pinned Chunk #{}", chunk.seq_num))
+                        RichText::new(format!("Pinned Chunk #{}", chunk.seq_num))
                             .strong()
+                            .monospace()
                             .color(COLOR_PINNED_HIGHLIGHT)
-                            .size(13.0),
+                            .size(12.5),
                     );
                     if ui
                         .add_enabled(chunk.seq_num > 0, Button::new("◀ Prev"))
@@ -1298,32 +1620,35 @@ impl TransferApp {
                     }
                 });
 
-                ui.add_space(2.0);
+                ui.add_space(2.0_f32);
 
                 ui.columns(3, |cols| {
                     cols[0].vertical(|ui| {
                         ui.label(
                             RichText::new(format!(
-                                "State: {} ({})",
+                                "State: {} {}",
                                 chunk.state.symbol(),
                                 chunk.state.label()
                             ))
                             .strong()
-                            .size(12.0),
+                            .size(11.5)
+                            .color(COLOR_TEXT_PRIMARY),
                         );
                         ui.label(
                             RichText::new(format!(
-                                "Byte Offset: {} .. {} ({} B)",
+                                "Byte Range: {} .. {} ({} B)",
                                 byte_offset, byte_end, byte_len
                             ))
                             .monospace()
-                            .size(11.5),
+                            .size(11.0)
+                            .color(COLOR_TEXT_SECONDARY),
                         );
                     });
                     cols[1].vertical(|ui| {
                         ui.label(
-                            RichText::new(format!("ACK Details: {}", chunk.ack_kind.label()))
-                                .size(12.0),
+                            RichText::new(format!("ACK Type: {}", chunk.ack_kind.label()))
+                                .size(11.5)
+                                .color(COLOR_TEXT_PRIMARY),
                         );
                         let retrans_text = match chunk.last_retransmit_reason {
                             Some(reason) => format!(
@@ -1333,36 +1658,40 @@ impl TransferApp {
                             ),
                             None => format!("Retransmissions: {}", chunk.retransmit_count),
                         };
-                        ui.label(RichText::new(retrans_text).size(11.5).color(
-                            if chunk.had_retransmission {
-                                COLOR_WARNING
-                            } else {
-                                Color32::LIGHT_GRAY
-                            },
-                        ));
+                        ui.label(
+                            RichText::new(retrans_text).size(11.0).color(
+                                if chunk.had_retransmission {
+                                    COLOR_WARNING
+                                } else {
+                                    COLOR_TEXT_MUTED
+                                },
+                            ),
+                        );
                     });
                     cols[2].vertical(|ui| {
                         let first_str = chunk
                             .first_event_elapsed
                             .map(|d| format!("+{:.1}ms", d.as_secs_f64() * 1000.0))
-                            .unwrap_or_else(|| "Not observed".to_string());
+                            .unwrap_or_else(|| "--".to_string());
                         let last_str = chunk
                             .last_sent_elapsed
                             .map(|d| format!("+{:.1}ms", d.as_secs_f64() * 1000.0))
-                            .unwrap_or_else(|| "N/A".to_string());
+                            .unwrap_or_else(|| "--".to_string());
                         let ack_str = chunk
                             .acked_elapsed
                             .map(|d| format!("+{:.1}ms", d.as_secs_f64() * 1000.0))
-                            .unwrap_or_else(|| "Pending".to_string());
+                            .unwrap_or_else(|| "--".to_string());
                         ui.label(
-                            RichText::new(format!("First Event: {} | Last Tx: {}", first_str, last_str))
+                            RichText::new(format!("First: {} | Last Tx: {}", first_str, last_str))
                                 .monospace()
-                                .size(11.0),
+                                .size(10.5)
+                                .color(COLOR_TEXT_SECONDARY),
                         );
                         ui.label(
-                            RichText::new(format!("Confirmed At: {}", ack_str))
+                            RichText::new(format!("Confirmed: {}", ack_str))
                                 .monospace()
-                                .size(11.0),
+                                .size(10.5)
+                                .color(COLOR_SUCCESS),
                         );
                     });
                 });
@@ -1371,27 +1700,43 @@ impl TransferApp {
 
     fn render_timeline_panel(&mut self, ui: &mut Ui) {
         ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new("Live Protocol Event Timeline & Trace").strong());
+            ui.label(
+                RichText::new("PROTOCOL EVENT TIMELINE & LOGS")
+                    .size(11.0)
+                    .strong()
+                    .color(COLOR_TEXT_SECONDARY),
+            );
+
             ui.separator();
+
             ui.selectable_value(
                 &mut self.timeline_filter,
                 TimelineFilter::All,
-                RichText::new("All").size(11.5),
+                RichText::new("All").size(11.0),
             );
             ui.selectable_value(
                 &mut self.timeline_filter,
                 TimelineFilter::WindowAndSack,
-                RichText::new("Window & SACK").size(11.5),
+                RichText::new("Window & SACK").size(11.0),
             );
             ui.selectable_value(
                 &mut self.timeline_filter,
                 TimelineFilter::RetransAndTimeout,
-                RichText::new("Timeouts & Retrans").size(11.5),
+                RichText::new("Timeouts & Retrans").size(11.0),
             );
             ui.selectable_value(
                 &mut self.timeline_filter,
                 TimelineFilter::DataAndAck,
-                RichText::new("Data & ACK").size(11.5),
+                RichText::new("Data & ACK").size(11.0),
+            );
+
+            ui.separator();
+
+            // Search filter box
+            ui.add(
+                egui::TextEdit::singleline(&mut self.log_search_query)
+                    .desired_width(140.0_f32)
+                    .hint_text("Filter logs..."),
             );
 
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -1399,31 +1744,58 @@ impl TransferApp {
                     self.timeline_events.clear();
                     self.logs.clear();
                 }
+
+                if ui
+                    .button("Copy Logs")
+                    .on_hover_text("Copy visible events and logs to system clipboard")
+                    .clicked()
+                {
+                    let mut export = String::new();
+                    for ev in &self.timeline_events {
+                        export.push_str(&format!(
+                            "[+{:>7.3}s] [{:<9}] {}\n",
+                            ev.elapsed.as_secs_f64(),
+                            ev.kind.tag(),
+                            ev.message
+                        ));
+                    }
+                    for log in &self.logs {
+                        export.push_str(log);
+                        export.push('\n');
+                    }
+                    ui.ctx().copy_text(export);
+                }
             });
         });
 
+        ui.add_space(2.0_f32);
+
+        // Structured Technical Log Table
         egui::Frame::none()
-            .fill(Color32::from_rgb(14, 18, 26))
+            .fill(Color32::from_rgb(12, 15, 20))
             .stroke(Stroke::new(1.0_f32, COLOR_CARD_BORDER))
-            .rounding(6.0_f32)
-            .inner_margin(8.0_f32)
+            .rounding(Rounding::same(3.0_f32))
+            .inner_margin(6.0_f32)
             .show(ui, |ui| {
                 ScrollArea::vertical()
                     .id_salt("protocol_timeline_scroll")
                     .stick_to_bottom(!self.vis_paused)
-                    .max_height(135.0)
+                    .max_height(145.0_f32)
                     .show(ui, |ui| {
                         if self.timeline_events.is_empty() && self.logs.is_empty() {
                             ui.label(
                                 RichText::new("No protocol events recorded yet.")
-                                    .color(Color32::DARK_GRAY),
+                                    .size(11.0)
+                                    .color(COLOR_TEXT_MUTED),
                             );
                             return;
                         }
 
-                        // Render structured protocol telemetry events filtered by user selection
+                        let search_term = self.log_search_query.trim().to_lowercase();
+
+                        // Render structured protocol telemetry events filtered by user selection & search
                         for ev in &self.timeline_events {
-                            let matches = match self.timeline_filter {
+                            let category_matches = match self.timeline_filter {
                                 TimelineFilter::All => true,
                                 TimelineFilter::WindowAndSack => matches!(
                                     ev.kind,
@@ -1443,11 +1815,18 @@ impl TransferApp {
                                     ProtocolEventKind::DataSent | ProtocolEventKind::AckReceived
                                 ),
                             };
-                            if !matches {
+                            if !category_matches {
                                 continue;
                             }
 
-                            let color = match ev.kind {
+                            if !search_term.is_empty()
+                                && !ev.message.to_lowercase().contains(&search_term)
+                                && !ev.kind.tag().to_lowercase().contains(&search_term)
+                            {
+                                continue;
+                            }
+
+                            let tag_color = match ev.kind {
                                 ProtocolEventKind::TimeoutDetected
                                 | ProtocolEventKind::Retransmission => COLOR_DANGER,
                                 ProtocolEventKind::SackUpdate => COLOR_WARNING,
@@ -1455,29 +1834,50 @@ impl TransferApp {
                                 | ProtocolEventKind::Completed
                                 | ProtocolEventKind::Verification => COLOR_SUCCESS,
                                 ProtocolEventKind::Handshake => COLOR_PRIMARY,
-                                _ => Color32::from_rgb(195, 208, 225),
+                                _ => COLOR_INFO,
                             };
 
-                            let line = format!(
-                                "[+{:>7.3}s] [{:<9}] {}",
-                                ev.elapsed.as_secs_f64(),
-                                ev.kind.tag(),
-                                ev.message
-                            );
-                            ui.label(RichText::new(line).color(color).monospace().size(11.5));
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 8.0_f32;
+                                ui.label(
+                                    RichText::new(format!("+{:>7.3}s", ev.elapsed.as_secs_f64()))
+                                        .monospace()
+                                        .size(10.5)
+                                        .color(COLOR_TEXT_MUTED),
+                                );
+                                ui.label(
+                                    RichText::new(format!("[{:<10}]", ev.kind.tag()))
+                                        .monospace()
+                                        .size(10.5)
+                                        .strong()
+                                        .color(tag_color),
+                                );
+                                ui.label(
+                                    RichText::new(&ev.message)
+                                        .monospace()
+                                        .size(11.0)
+                                        .color(COLOR_TEXT_PRIMARY),
+                                );
+                            });
                         }
 
                         // Also show general application status logs when filter is All
                         if self.timeline_filter == TimelineFilter::All {
                             for log in &self.logs {
+                                if !search_term.is_empty()
+                                    && !log.to_lowercase().contains(&search_term)
+                                {
+                                    continue;
+                                }
+
                                 let color = if log.contains("ERROR") || log.contains("failed") {
                                     COLOR_DANGER
                                 } else if log.contains("SUCCESS") || log.contains("verified") {
                                     COLOR_SUCCESS
                                 } else {
-                                    Color32::from_rgb(155, 168, 185)
+                                    COLOR_TEXT_MUTED
                                 };
-                                ui.label(RichText::new(log).color(color).monospace().size(11.0));
+                                ui.label(RichText::new(log).color(color).monospace().size(10.5));
                             }
                         }
                     });
@@ -1495,8 +1895,6 @@ fn project_chunk_for_perspective(
         return chunk.clone();
     }
 
-    // If running on Sender and user inspects the Receiver SACK Buffer perspective:
-    // Derive receiver buffer state strictly from peer-confirmed `window_base` (`ack_num`) and 64-bit `last_sack_bitmask`.
     if st.perspective == WindowPerspective::Sender
         && target_perspective == WindowPerspective::Receiver
     {
@@ -1506,7 +1904,6 @@ fn project_chunk_for_perspective(
         } else if chunk.state == ChunkState::Sacked {
             projected.state = ChunkState::Sacked;
         } else {
-            // Check if any higher chunk in the visible set is already SACKed (meaning receiver has seen past this chunk)
             let highest_sacked = st
                 .visible_chunks
                 .iter()
@@ -1514,9 +1911,9 @@ fn project_chunk_for_perspective(
                 .map(|c| c.seq_num)
                 .max();
             if highest_sacked.is_some_and(|hi| chunk.seq_num < hi) {
-                projected.state = ChunkState::InFlight; // Unreceived gap at receiver
+                projected.state = ChunkState::InFlight;
             } else {
-                projected.state = ChunkState::Pending; // Not yet confirmed at receiver
+                projected.state = ChunkState::Pending;
             }
         }
         return projected;
@@ -1528,19 +1925,38 @@ fn project_chunk_for_perspective(
 fn render_legend_badge(ui: &mut Ui, bg: Color32, border: Color32, text: &str, tooltip: &str) {
     let resp = egui::Frame::none()
         .fill(bg)
-        .stroke(Stroke::new(1.2, border))
-        .rounding(4.0)
-        .inner_margin(egui::Margin::symmetric(6.0, 2.0))
+        .stroke(Stroke::new(1.0_f32, border))
+        .rounding(Rounding::same(2.0_f32))
+        .inner_margin(egui::Margin::symmetric(5.0_f32, 2.0_f32))
         .show(ui, |ui| {
             ui.label(
                 RichText::new(text)
-                    .size(11.0)
+                    .size(10.5)
                     .color(Color32::WHITE)
                     .strong(),
             );
         })
         .response;
     resp.on_hover_text(tooltip);
+}
+
+fn render_segment_tab(ui: &mut Ui, label: &str, selected: bool) -> bool {
+    let (bg, stroke, text_color) = if selected {
+        (COLOR_PRIMARY, Stroke::NONE, Color32::WHITE)
+    } else {
+        (
+            Color32::from_rgb(24, 28, 38),
+            Stroke::new(1.0_f32, COLOR_CARD_BORDER),
+            COLOR_TEXT_SECONDARY,
+        )
+    };
+
+    let button = Button::new(RichText::new(label).size(12.0).strong().color(text_color))
+        .fill(bg)
+        .stroke(stroke)
+        .rounding(Rounding::same(3.0_f32));
+
+    ui.add(button).clicked()
 }
 
 fn draw_chunk_cell(
@@ -1561,52 +1977,52 @@ fn draw_chunk_cell(
         ChunkState::Acked => (COLOR_STATE_ACKED_BG, COLOR_STATE_ACKED_BORDER),
     };
 
-    painter.rect_filled(rect, Rounding::same(4.0), bg_color);
+    painter.rect_filled(rect, Rounding::same(2.0_f32), bg_color);
 
-    // Shape cues (so states are distinguishable without relying solely on color):
+    // Shape cues for accessible distinction without depending solely on color:
     match chunk.state {
         ChunkState::Acked => {
-            // Top horizontal confirmation bar
-            let bar = Rect::from_min_max(rect.min, Pos2::new(rect.max.x, rect.min.y + 3.0));
-            painter.rect_filled(bar, Rounding::same(2.0), COLOR_STATE_ACKED_BORDER);
+            // Top horizontal confirmation accent bar
+            let bar = Rect::from_min_max(rect.min, Pos2::new(rect.max.x, rect.min.y + 2.5_f32));
+            painter.rect_filled(bar, Rounding::same(1.0_f32), COLOR_STATE_ACKED_BORDER);
         }
         ChunkState::Sacked => {
             // Left vertical accent bar indicating out-of-order SACK buffer
-            let bar = Rect::from_min_max(rect.min, Pos2::new(rect.min.x + 3.5, rect.max.y));
-            painter.rect_filled(bar, Rounding::same(2.0), COLOR_STATE_SACKED_BORDER);
+            let bar = Rect::from_min_max(rect.min, Pos2::new(rect.min.x + 3.0_f32, rect.max.y));
+            painter.rect_filled(bar, Rounding::same(1.0_f32), COLOR_STATE_SACKED_BORDER);
         }
         ChunkState::Retransmitting => {
-            // Bottom warning bar
-            let bar = Rect::from_min_max(Pos2::new(rect.min.x, rect.max.y - 3.5), rect.max);
-            painter.rect_filled(bar, Rounding::same(2.0), COLOR_STATE_RETRANS_BORDER);
+            // Bottom warning accent bar
+            let bar = Rect::from_min_max(Pos2::new(rect.min.x, rect.max.y - 3.0_f32), rect.max);
+            painter.rect_filled(bar, Rounding::same(1.0_f32), COLOR_STATE_RETRANS_BORDER);
         }
         _ => {}
     }
 
     // Persistent retransmission history cue: top-right dot when `had_retransmission` is true
     if chunk.had_retransmission {
-        let center = Pos2::new(rect.max.x - 4.5, rect.min.y + 4.5);
-        painter.circle_filled(center, 2.8, COLOR_WARNING);
-        painter.circle_stroke(center, 2.8, Stroke::new(0.8, Color32::BLACK));
+        let center = Pos2::new(rect.max.x - 4.0_f32, rect.min.y + 4.0_f32);
+        painter.circle_filled(center, 2.4_f32, COLOR_WARNING);
+        painter.circle_stroke(center, 2.4_f32, Stroke::new(0.8_f32, Color32::BLACK));
     }
 
     // Active sliding window highlight & pinned border
     let stroke = if is_pinned {
-        Stroke::new(2.2, COLOR_PINNED_HIGHLIGHT)
+        Stroke::new(2.0_f32, COLOR_PINNED_HIGHLIGHT)
     } else if is_base_chunk {
-        Stroke::new(2.0, COLOR_WINDOW_HIGHLIGHT)
+        Stroke::new(2.0_f32, COLOR_WINDOW_HIGHLIGHT)
     } else if is_in_active_window {
-        Stroke::new(1.5, COLOR_WINDOW_HIGHLIGHT)
+        Stroke::new(1.2_f32, COLOR_WINDOW_HIGHLIGHT)
     } else {
-        Stroke::new(1.0, border_color)
+        Stroke::new(1.0_f32, border_color)
     };
-    painter.rect_stroke(rect, Rounding::same(4.0), stroke);
+    painter.rect_stroke(rect, Rounding::same(2.0_f32), stroke);
 
-    // Text label combining non-color symbol + sequence number
+    // Sequence text with non-color state symbol
     let short_seq = chunk.seq_num % 10000;
     let label = format!("{}{}", chunk.state.symbol(), short_seq);
     let text_color = if chunk.state == ChunkState::Pending {
-        Color32::from_rgb(140, 152, 175)
+        COLOR_TEXT_MUTED
     } else {
         Color32::WHITE
     };
@@ -1615,7 +2031,7 @@ fn draw_chunk_cell(
         rect.center(),
         egui::Align2::CENTER_CENTER,
         label,
-        FontId::monospace(10.0),
+        FontId::monospace(9.5_f32),
         text_color,
     );
 }
@@ -1634,6 +2050,7 @@ fn render_chunk_tooltip(
             st.total_chunks.saturating_sub(1)
         ))
         .strong()
+        .monospace()
         .color(COLOR_PRIMARY),
     );
     ui.separator();
@@ -1644,7 +2061,7 @@ fn render_chunk_tooltip(
     ));
     ui.label(format!("ACK Status: {}", chunk.ack_kind.label()));
     ui.label(format!(
-        "Byte Range: {} .. {} ({} bytes)",
+        "Byte Range: {} .. {} ({} B)",
         byte_offset,
         byte_offset + byte_len,
         byte_len
@@ -1653,10 +2070,10 @@ fn render_chunk_tooltip(
         "In Active Window: {}",
         if is_in_active_window { "Yes" } else { "No" }
     ));
-    ui.label(format!("Retransmission Count: {}", chunk.retransmit_count));
+    ui.label(format!("Retransmissions: {}", chunk.retransmit_count));
     if let Some(reason) = chunk.last_retransmit_reason {
         ui.label(
-            RichText::new(format!("Retransmit Reason: {}", reason.label())).color(COLOR_WARNING),
+            RichText::new(format!("Reason: {}", reason.label())).color(COLOR_WARNING),
         );
     }
     if let Some(first_t) = chunk.first_event_elapsed {
@@ -1673,16 +2090,28 @@ fn render_chunk_tooltip(
     }
     if let Some(ack_t) = chunk.acked_elapsed {
         ui.label(format!(
-            "Confirmed At: +{:.1} ms",
+            "Confirmed: +{:.1} ms",
             ack_t.as_secs_f64() * 1000.0
         ));
     }
     ui.separator();
     ui.label(
-        RichText::new("Click cell to pin/unpin in the Chunk Inspector.")
-            .size(11.0)
-            .color(Color32::GRAY),
+        RichText::new("Click cell to pin in the Chunk Inspector below.")
+            .size(10.5)
+            .color(COLOR_TEXT_MUTED),
     );
+}
+
+fn format_file_size(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{} B", bytes)
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else if bytes < 1024 * 1024 * 1024 {
+        format!("{:.2} MB", bytes as f64 / (1024.0 * 1024.0))
+    } else {
+        format!("{:.2} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+    }
 }
 
 fn chrono_free_timestamp() -> String {

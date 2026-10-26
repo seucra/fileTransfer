@@ -231,14 +231,14 @@ fn main() -> eframe::Result<()> {
             // Default: Launch GUI application
             let native_options = eframe::NativeOptions {
                 viewport: eframe::egui::ViewportBuilder::default()
-                    .with_inner_size([880.0, 740.0])
-                    .with_min_inner_size([680.0, 520.0])
-                    .with_title("Reliable UDP File Transfer"),
+                    .with_inner_size([1280.0, 780.0])
+                    .with_min_inner_size([960.0, 600.0])
+                    .with_title("Reliable UDP File Transfer (RFTP)"),
                 ..Default::default()
             };
 
             eframe::run_native(
-                "Reliable UDP File Transfer",
+                "Reliable UDP File Transfer (RFTP)",
                 native_options,
                 Box::new(|cc| Ok(Box::new(TransferApp::new(cc)))),
             )
