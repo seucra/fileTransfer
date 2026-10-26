@@ -1,4 +1,14 @@
-/target
-/downloads
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.coverage
+htmlcov/
+downloads/
 *.bin
 *.dat
+.venv/
+venv/
+ENV/
+target/

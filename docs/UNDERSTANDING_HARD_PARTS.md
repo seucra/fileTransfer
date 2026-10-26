@@ -13,9 +13,9 @@ If the receiver gets chunks `0, 1, 3, 4, 5` (chunk `2` was lost), standard cumul
 The sender wouldn't know whether chunks `3, 4, 5` made it, and in a pure Go-Back-N scheme, it would wastefully retransmit `2, 3, 4, 5`.
 
 ### How Our SACK Mask Works
-In `src/protocol/packet.rs` and `src/protocol/window.rs`, our ACK header has:
-- `ack_num: u32`: First missing chunk (`base`).
-- `sack_bitmask: u64`: A 64-bit window relative to `ack_num`.
+In `rftp/protocol/packet.py` and `rftp/protocol/window.py`, our ACK header has:
+- `ack_num: int`: First missing chunk (`base`).
+- `sack_bitmask: int`: A 64-bit window relative to `ack_num`.
 
 Each bit `i` (from `0` to `63`) represents whether chunk `ack_num + 1 + i` was received:
 
@@ -28,29 +28,24 @@ Chunk #:        3     4     5     6   ...   66
 Bit value:      1     1     1     0   ...    0
 ```
 
-#### On the Receiver Side:
-```rust
-let ack_num = self.base;
-let mut sack_bitmask: u64 = 0;
+#### On the Receiver Side (`rftp/protocol/window.py`):
+```python
+ack_num = self.base
+sack_bitmask = 0
 
-for i in 0..64 {
-    let check_seq = ack_num + 1 + (i as u32);
-    if self.out_of_order.contains(&check_seq) {
-        sack_bitmask |= 1u64 << i;
-    }
-}
+for i in range(64):
+    check_seq = ack_num + 1 + i
+    if check_seq in self.out_of_order:
+        sack_bitmask |= 1 << i
 ```
 
-#### On the Sender Side:
-```rust
-for i in 0..64 {
-    if (sack_bitmask & (1u64 << i)) != 0 {
-        let sack_seq = ack_num + 1 + (i as u32);
-        if let Some(entry) = self.in_flight.get_mut(&sack_seq) {
-            entry.acked = true; // Mark as safely delivered!
-        }
-    }
-}
+#### On the Sender Side (`rftp/protocol/window.py`):
+```python
+for i in range(64):
+    if (sack_bitmask & (1 << i)) != 0:
+        sack_seq = ack_num + 1 + i
+        if sack_seq in self.in_flight:
+            self.in_flight[sack_seq].acked = True  # Delivered!
 ```
 **Result**: The sender immediately knows that chunks `3, 4, 5` are safe, and retransmits **only chunk 2**.
 
@@ -66,16 +61,15 @@ Suppose chunk `5` is sent at `t = 0ms`. At `t = 200ms`, the timer expires, so ch
 If you calculate RTT based on retransmissions, you either artificially inflate or severely underestimate round-trip time.
 
 ### The Solution: Karn's Rule
-In `src/protocol/window.rs`:
-```rust
-// Only take RTT samples for packets that were never retransmitted
-if entry.retransmit_count == 0 && rtt_sample.is_none() {
-    rtt_sample = Some(now.saturating_duration_since(entry.sent_at));
-}
+In `rftp/protocol/window.py`:
+```python
+# Only take RTT samples for packets that were never retransmitted
+if entry.retransmit_count == 0 and rtt_sample is None:
+    rtt_sample = max(0.0001, now - entry.sent_at)
 ```
 When a clean sample is obtained, the dynamic retransmission timeout (RTO) adapts:
-```rust
-rto = (rtt * 2).clamp(Duration::from_millis(80), Duration::from_millis(800));
+```python
+rto = min(0.8, max(0.08, rtt_sample * 2))
 ```
 This ensures the timer is responsive to fast local networks (~1ms RTT) without premature timeouts during bursts.
 
@@ -84,25 +78,25 @@ This ensures the timer is responsive to fast local networks (~1ms RTT) without p
 ## 3. Direct Offset Disk Streaming (Zero-RAM Overhead)
 
 ### Why Not Buffer Everything in Memory?
-A common beginner mistake in custom transfer protocols is collecting chunks in a `Vec<u8>` or hash table in RAM until the transfer completes.
+A common beginner mistake in custom transfer protocols is collecting chunks in a `bytearray` or hash table in RAM until the transfer completes.
 - For a 50 MB file, that consumes 50 MB RAM.
 - For a 4 GB video or ISO, it will crash low-memory laptops with out-of-memory (OOM) errors.
 
 ### Seekable Chunker & Direct Writer
-In `src/file/chunker.rs` and `src/file/writer.rs`:
+In `rftp/file/chunker.py` and `rftp/file/writer.py`:
 1. **Reading**: The sender opens the file once and seeks to the chunk's offset:
-   ```rust
-   let offset = (chunk_index as u64) * (self.chunk_size as u64);
-   self.file.seek(SeekFrom::Start(offset))?;
-   self.file.read_exact(&mut buf)?;
+   ```python
+   offset = chunk_index * self.chunk_size
+   self._file.seek(offset)
+   data = self._file.read(bytes_to_read)
    ```
 2. **Writing**: When the receiver gets chunk `seq = 42` before chunk `seq = 2`, it writes chunk 42 straight to disk at `offset = 42 * chunk_size`:
-   ```rust
-   let offset = (chunk_index as u64) * (self.chunk_size as u64);
-   self.file.seek(SeekFrom::Start(offset))?;
-   self.file.write_all(data)?;
+   ```python
+   offset = chunk_index * self.chunk_size
+   self._file.seek(offset)
+   self._file.write(data)
    ```
-Because the OS filesystem supports sparse files and seekable random-access writes, memory usage remains virtually constant (~8 MB total process footprint), whether transferring a 10 KB text snippet or an 8 GB disk image.
+Because the OS filesystem supports seekable random-access writes, memory usage remains virtually constant (~12 MB total process footprint), whether transferring a 10 KB text snippet or an 8 GB disk image.
 
 ---
 
@@ -114,22 +108,21 @@ However, Wi-Fi interference drops the `START_ACK` datagram.
 The sender times out after 300 ms and retransmits `START`.
 
 If the receiver blindly executed:
-```rust
-// NAIVE APPROACH:
-FileWriter::new(...) // <-- Truncates existing file back to 0 bytes!
+```python
+# NAIVE APPROACH:
+FileWriter(...)  # <-- Truncates existing file back to 0 bytes!
 ```
 It would erase any chunks already in flight!
 
 ### The Solution
-In `src/network/receiver.rs`:
-```rust
-if writer.is_some() && sender_addr == Some(from_addr) {
-    // We are already actively receiving this transfer from this peer.
-    // Just re-emit the START_ACK and keep our existing disk writer intact!
-    let ack = Packet::new_start_ack(true, "Ready to receive").serialize();
-    let _ = socket.send_to(&ack, from_addr);
-    continue;
-}
+In `rftp/network/receiver.py`:
+```python
+if writer is not None and sender_addr == from_addr:
+    # We are already actively receiving this transfer from this peer.
+    # Just re-emit the START_ACK and keep our existing disk writer intact!
+    ack = Packet.new_start_ack(True, "Ready to receive").serialize()
+    sock.send_to(ack, from_addr)
+    continue
 ```
 This makes the handshake completely idempotent under severe initial packet loss.
 
@@ -137,19 +130,19 @@ This makes the handshake completely idempotent under severe initial packet loss.
 
 ## 5. Clean Asynchronous GUI Architecture
 
-The UI runs on `eframe` (Rust immediate-mode GUI) while the network workers run on separate OS threads:
+The UI runs on standard Tkinter on the main thread while network workers run on separate background threads:
 
 ```
-[ GUI Thread (eframe/egui 60fps) ]
+[ GUI Main Thread (Tkinter event loop) ]
        ^                  |
-       |                  | Arc<AtomicBool> (cancel_flag)
-       | (unbounded mpsc channel)
+       |                  | threading.Event (cancel_event)
+       | (thread-safe queue.Queue)
        | TransferEvent { Progress, Log, Success, Error }
        |
 [ Network Worker Thread (run_sender / run_receiver) ]
        |
-[ Non-blocking UDP Socket ]
+[ Non-blocking UDP Socket (socket.SOCK_DGRAM) ]
 ```
 
-- The GUI never touches network sockets directly, preventing UI freezing or frame drops.
-- Clicking "Cancel" simply sets an atomic bool (`cancel_flag.store(true)`), which prompts the worker thread to send a `CANCEL` datagram to the peer and cleanly shut down.
+- The GUI never blocks on socket I/O, preventing application unresponsiveness.
+- Clicking "Cancel" simply sets an atomic event (`cancel_event.set()`), which prompts the worker thread to send a `CANCEL` datagram to the peer and cleanly shut down.

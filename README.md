@@ -1,17 +1,20 @@
 # Reliable UDP File Transfer (RFTP)
 
-> A modern, peer-to-peer file transfer tool written in **Rust** that sends files reliably between two laptops over local Wi-Fi hotspots using custom **UDP** instead of TCP.
+> A clean, peer-to-peer file transfer tool in **Python** that sends files reliably between two laptops over local Wi-Fi hotspots using custom **UDP** instead of TCP.
 
 No router, internet connection, or external servers needed. Just connect both machines to the same Wi-Fi hotspot and send.
+
+> **Branch note**: The `main` branch contains the pure **Python** implementation (zero external dependencies). The [`dev`](https://github.com/seucra/fileTransfer/tree/dev) branch contains the high-performance **Rust** implementation.
 
 ---
 
 ## Highlights
 
+- **Zero External Dependencies**: Runs entirely on the standard Python library (`socket`, `struct`, `zlib`, `hashlib`, `tkinter`).
 - **Zero-Internet P2P**: Direct laptop-to-laptop transfer over local Wi-Fi or ad-hoc hotspots.
 - **Custom Reliability Layer**: Built on raw UDP with sequence numbers, a sliding window, Selective ACKs (SACK), and dynamic timeouts.
 - **Bit-Level Integrity**: Per-packet CRC32 checksums drop corrupted packets immediately, followed by whole-file SHA-256 verification after transfer.
-- **Modern Desktop GUI**: Clean dark-mode interface built with `eframe`/`egui`, featuring live progress bars, speed metrics, ETA, and event logs.
+- **Modern Desktop GUI**: Clean dark-mode interface built with Tkinter, featuring live progress bars, speed metrics, ETA, and event logs.
 - **Headless CLI & Benchmarks**: Full CLI support for terminal workflows, plus an automated benchmark tool comparing custom UDP against TCP.
 - **Simulated Packet Loss**: Built-in packet drop slider (0% to 50%) to demonstrate and test retransmission recovery in real time.
 
@@ -19,25 +22,21 @@ No router, internet connection, or external servers needed. Just connect both ma
 
 ## Quickstart
 
-### 1. Build from Source
-Make sure you have Rust installed (`cargo` and `rustc >= 1.75`):
-
-```bash
-cargo build --release
-```
+### 1. Requirements
+- Python 3.8+ (standard library only, no `pip install` required!).
 
 ### 2. Launch Desktop GUI (Default)
 ```bash
-./target/release/file_transfer
+python3 main.py
 ```
 
 ### 3. Or Use the CLI
 ```bash
 # On the receiver machine (Laptop B):
-./target/release/file_transfer recv --dest ./downloads --bind 0.0.0.0:9999
+python3 main.py recv --dest ./downloads --bind 0.0.0.0:9999
 
 # On the sender machine (Laptop A):
-./target/release/file_transfer send --file video.mp4 --target 192.168.43.50:9999
+python3 main.py send --file video.mp4 --target 192.168.43.50:9999
 ```
 
 ---
@@ -69,12 +68,12 @@ Everything is documented in detail in the [`docs/`](docs/) directory:
 Run the test suite covering packet encoding, SACK bitmasks, timeouts, and multi-threaded transfers:
 
 ```bash
-cargo test
+python3 -m unittest discover -s tests
 ```
 
 To run the local empirical TCP vs. UDP benchmark:
 ```bash
-./target/release/file_transfer benchmark --size-mb 5
+python3 main.py benchmark --size-mb 5
 ```
 
 ---

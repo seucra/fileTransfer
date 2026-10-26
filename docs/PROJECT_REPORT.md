@@ -1,7 +1,7 @@
 # Project Report: Reliable File Transfer Protocol over UDP (RFTP)
 
 **Course**: Computer Networks Laboratory  
-**Technology Stack**: Rust, UDP Sockets (`std::net`), `eframe`/`egui` GUI, `sha2`, `crc32fast`  
+**Technology Stack**: Python 3 (`socket`, `struct`, `hashlib`, `zlib`, `tkinter`), zero external dependencies *(Note: High-performance Rust edition available on `dev` branch)*  
 **Author**: Shams Tabrez Ahmed  
 
 ---
@@ -10,11 +10,11 @@
 
 Standard file transfer solutions typically rely on TCP (File Transfer Protocol, HTTP, SCP) or cloud services. In local peer-to-peer environments—such as direct ad-hoc Wi-Fi connections between laptops—cloud solutions introduce unnecessary internet dependencies, while standard UDP lacks the delivery guarantees required for non-streaming data.
 
-This project designs and implements **RFTP**, a complete, reliable file transfer protocol implemented on top of raw UDP in **Rust**. The application provides:
+This project designs and implements **RFTP**, a complete, reliable file transfer protocol implemented on top of raw UDP in **Python 3** (with a parallel **Rust** edition on the `dev` branch). The application provides:
 1. End-to-end reliability (zero bit corruption) through per-packet CRC32 checks and whole-file SHA-256 verification.
 2. High-throughput streaming via a configurable **Sliding Window** with **Selective Acknowledgement (SACK)**.
 3. Adaptive retransmission timeouts based on round-trip time estimation.
-4. A modern, lightweight desktop GUI (`eframe`) and a feature-complete CLI mode.
+4. A modern, lightweight desktop GUI (`tkinter`) and a feature-complete CLI mode.
 5. An automated benchmark suite that empirically evaluates RFTP against kernel TCP under various simulated packet loss conditions.
 
 ---
@@ -31,13 +31,13 @@ The User Datagram Protocol (RFC 768) provides a minimal abstraction over IP:
 ### The RFTP Design Solution
 RFTP addresses each limitation through transport-layer abstractions implemented in user space:
 
-| UDP Limitation | RFTP Mechanism | Implementation Location |
-|---|---|---|
-| **Packet Loss** | Selective Repeat Retransmissions & Dynamic RTO | `src/protocol/window.rs`, `src/network/sender.rs` |
-| **Out-of-Order Delivery** | Sequence Numbers & 64-bit SACK Bitmask | `src/protocol/packet.rs`, `src/protocol/window.rs` |
-| **Bit Corruption** | 32-bit CRC Checksums per packet | `src/protocol/packet.rs` |
-| **Buffer Overflow** | Sliding Window Flow Control (`window_size`) | `src/protocol/window.rs` |
-| **Incomplete/Truncated Files** | Handshake Metadata & End-to-End SHA-256 Check | `src/file/writer.rs`, `src/network/receiver.rs` |
+| UDP Limitation | RFTP Mechanism | Python (`main`) | Rust (`dev`) |
+|---|---|---|---|
+| **Packet Loss** | Selective Repeat Retransmissions & Dynamic RTO | `rftp/protocol/window.py`, `rftp/network/sender.py` | `src/protocol/window.rs`, `src/network/sender.rs` |
+| **Out-of-Order Delivery** | Sequence Numbers & 64-bit SACK Bitmask | `rftp/protocol/packet.py`, `rftp/protocol/window.py` | `src/protocol/packet.rs`, `src/protocol/window.rs` |
+| **Bit Corruption** | 32-bit CRC Checksums per packet | `rftp/protocol/packet.py` | `src/protocol/packet.rs` |
+| **Buffer Overflow** | Sliding Window Flow Control (`window_size`) | `rftp/protocol/window.py` | `src/protocol/window.rs` |
+| **Incomplete/Truncated Files** | Handshake Metadata & End-to-End SHA-256 Check | `rftp/file/writer.py`, `rftp/network/receiver.py` | `src/file/writer.rs`, `src/network/receiver.rs` |
 
 ---
 
@@ -68,23 +68,24 @@ All communication occurs via binary datagrams prefixed by a 30-byte header:
 
 To evaluate performance honestly, the project includes an automated benchmark runner that executes on the same host machine, transferring a 5 MB test file under controlled loss conditions.
 
-### Measured Results (Linux x86_64, 5 MB Random File)
+### Measured Results (Linux x86_64, 5 MB Random File - Python 3 Edition)
 
 ```
 +--------------------------------+------------+--------------+-----------------+-------------------+
 | Protocol                       | Time (sec) | Speed (MB/s) | Retransmissions | SHA-256 Integrity |
 +--------------------------------+------------+--------------+-----------------+-------------------+
-| TCP (Baseline Kernel Socket)   |       0.01 |       677.88 |               0 |       VERIFIED OK |
-| Custom UDP (0% loss)           |       0.18 |        28.52 |               0 |       VERIFIED OK |
-| Custom UDP (5% simulated loss) |      10.55 |         0.47 |             431 |       VERIFIED OK |
-| Custom UDP (15% simulated loss)|      28.48 |         0.18 |            1568 |       VERIFIED OK |
+| TCP (Baseline Kernel Socket)   |       0.01 |       659.27 |               0 |       VERIFIED OK |
+| Custom UDP (0% loss)           |       0.25 |        20.28 |               0 |       VERIFIED OK |
+| Custom UDP (5% simulated loss) |      10.15 |         0.49 |             425 |       VERIFIED OK |
+| Custom UDP (15% simulated loss)|      27.65 |         0.18 |            1574 |       VERIFIED OK |
 +--------------------------------+------------+--------------+-----------------+-------------------+
 ```
+*(For compiled native performance, the Rust implementation on branch `dev` yields ~28.5 MB/s at 0% loss).*
 
 ### Technical Discussion:
 1. **Cryptographic Consistency**: Under both 0% and 15% simulated loss, the receiver reconstructed the file with zero corruption (SHA-256 matched 100%).
-2. **Selective Repeat Efficiency**: Under 5% loss, 431 retransmissions occurred exclusively for the dropped packets. Intact out-of-order chunks were preserved, avoiding the throughput collapse associated with Go-Back-N.
-3. **Localhost vs. Wi-Fi Realities**: TCP's 677 MB/s on localhost is an artifact of the OS kernel short-circuiting network hardware into a fast RAM copy. Over physical 802.11 Wi-Fi, throughput is physically limited by the radio link rate (~20 to 120 Mbps), where RFTP's 28.52 MB/s (228 Mbps) user-space throughput saturates available bandwidth.
+2. **Selective Repeat Efficiency**: Under 5% loss, retransmissions occurred exclusively for the dropped packets. Intact out-of-order chunks were preserved, avoiding the throughput collapse associated with Go-Back-N.
+3. **Localhost vs. Wi-Fi Realities**: TCP's ~660 MB/s on localhost is an artifact of the OS kernel short-circuiting network hardware into a fast RAM copy. Over physical 802.11 Wi-Fi, throughput is physically limited by the radio link rate (~20 to 120 Mbps), where RFTP's 20+ MB/s user-space throughput comfortably saturates available bandwidth.
 
 ---
 
